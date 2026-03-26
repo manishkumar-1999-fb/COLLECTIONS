@@ -1,0 +1,16 @@
+COLLECTIONS HEADCOUNT MODEL - ASSUMPTIONS TAB
+===============================================
+Instructions: Adjust the yellow-highlighted cells (input cells) to model different scenarios
+
+PARAMETER,PRE-CO COLLECTIONS,POST-CO ILR,NOTES
+Contact Attempts per Account/Month,5,5,"Average attempts needed per delinquent account"
+Target Connect Rate %,25,20,"% of dials that result in contact with customer"
+Target AHT (mins),8,10,"Average Handle Time = Talk Time + Wrap Time"
+Target Occupancy %,75,75,"% of productive time spent on customer work"
+Working Days per Month,22,22,"Standard business days"
+Productive Hours per Day,5.5,5.5,"Hours available for customer contact work"
+Buffer % (PTO/Attrition/Ramp),15,15,"Additional headcount for coverage"
+
+DERIVED METRICS (Auto-calculated)
+Monthly Capacity per Agent (hrs),,,"= Productive Hrs × Working Days × Occupancy %"
+Dials per Agent per Month,,,"= Capacity × Dials per Hour (from benchmarks)"

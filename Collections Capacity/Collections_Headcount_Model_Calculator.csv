@@ -1,0 +1,37 @@
+COLLECTIONS HEADCOUNT MODEL - CAPACITY CALCULATOR TAB
+======================================================
+
+DEMAND SIDE - WORKLOAD CALCULATION
+===================================
+DPD_BUCKET,TEAM,CURRENT_ACCOUNTS,PROJECTED_ACCOUNTS,CONTACT_ATTEMPTS,REQUIRED_DIALS_CURRENT,REQUIRED_DIALS_PROJECTED,AHT_MINS,CONNECT_RATE_PCT,WORK_HOURS_CURRENT,WORK_HOURS_PROJECTED
+1-2,Collections,[From SQL],[From SQL],4,[=C×E],[=D×E],8,25,[=(F×H)/(60×I/100)],[=(G×H)/(60×I/100)]
+3-8,Collections,[From SQL],[From SQL],6,[=C×E],[=D×E],8,25,[=(F×H)/(60×I/100)],[=(G×H)/(60×I/100)]
+9-13,Collections,[From SQL],[From SQL],8,[=C×E],[=D×E],8,25,[=(F×H)/(60×I/100)],[=(G×H)/(60×I/100)]
+ILR,ILR,[From SQL],[From SQL],5,[=C×E],[=D×E],10,20,[=(F×H)/(60×I/100)],[=(G×H)/(60×I/100)]
+
+SUPPLY SIDE - CAPACITY CALCULATION
+===================================
+TEAM,CURRENT_HEADCOUNT,PRODUCTIVE_HRS_DAY,WORKING_DAYS,OCCUPANCY_PCT,MONTHLY_CAPACITY_PER_AGENT,TOTAL_TEAM_CAPACITY
+Collections,[Current Count],5.5,22,75%,[=C×D×E],[=B×F]
+ILR,[Current Count],5.5,22,75%,[=C×D×E],[=B×F]
+
+GAP ANALYSIS
+============
+TEAM,TOTAL_WORK_HOURS_CURRENT,TOTAL_WORK_HOURS_PROJECTED,CAPACITY_PER_AGENT,HEADCOUNT_NEEDED_CURRENT,HEADCOUNT_NEEDED_PROJECTED,HEADCOUNT_WITH_BUFFER_CURRENT,HEADCOUNT_WITH_BUFFER_PROJECTED,CURRENT_HEADCOUNT,GAP_CURRENT,GAP_PROJECTED
+Collections,[Sum from Demand],[Sum from Demand],[From Supply],[=B/D],[=C/D],[=E×1.15],[=F×1.15],[Current],[=I-E],[=I-F]
+ILR,[Sum from Demand],[Sum from Demand],[From Supply],[=B/D],[=C/D],[=E×1.15],[=F×1.15],[Current],[=I-E],[=I-F]
+
+SUMMARY
+=======
+METRIC,COLLECTIONS,ILR,TOTAL
+Current Accounts,[Sum],[Sum],[=B+C]
+Projected Accounts,[Sum],[Sum],[=B+C]
+Required Work Hours (Current),[Sum],[Sum],[=B+C]
+Required Work Hours (Projected),[Sum],[Sum],[=B+C]
+Current Headcount,[Count],[Count],[=B+C]
+Headcount Needed (Current),[Calc],[Calc],[=B+C]
+Headcount Needed (Projected),[Calc],[Calc],[=B+C]
+Headcount with Buffer,[Calc],[Calc],[=B+C]
+Gap (Current),[Calc],[Calc],[=B+C]
+Gap (Projected),[Calc],[Calc],[=B+C]
+Current Utilization %,[=Work Hrs/Capacity],[=Work Hrs/Capacity],N/A

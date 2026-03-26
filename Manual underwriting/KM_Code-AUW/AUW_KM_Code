@@ -1,0 +1,393 @@
+-- Select * from indus.public.op_metrics;
+
+-- OPERATIONAL METRICS 
+CREATE OR REPLACE TABLE indus.public.op_metrics AS
+
+-- US National Holidays 2026 (update this list annually)
+WITH us_holidays AS (
+  SELECT holiday_date FROM (VALUES 
+    ('2026-01-19'::DATE),  -- MLK Day
+    ('2026-02-16'::DATE),  -- Presidents Day
+    ('2026-05-25'::DATE),  -- Memorial Day
+    ('2026-06-19'::DATE),  -- Juneteenth
+    ('2026-07-03'::DATE),  -- Independence Day (observed)
+    ('2026-09-07'::DATE),  -- Labor Day
+    ('2026-11-26'::DATE),  -- Thanksgiving
+    ('2026-11-27'::DATE),  -- Day after Thanksgiving
+    ('2026-12-24'::DATE),  -- Christmas Eve
+    ('2026-12-25'::DATE),  -- Christmas Day
+    ('2026-12-31'::DATE)   -- New Year's Eve
+  ) AS t(holiday_date)
+)
+
+  SELECT
+    CASE
+      WHEN dayofweek(current_date()) = 3 THEN DATE_TRUNC('WEEK', review_complete_date_coalesce::DATE + 4)::DATE + 2
+      WHEN DATEDIFF('day', review_complete_date_coalesce, DATE_TRUNC('WEEK', current_date() + 4)::DATE - 5) < 0 AND DATEDIFF('day', review_complete_date_coalesce, current_date()) <= 0 THEN NULL
+      WHEN DATEDIFF('day', review_complete_date_coalesce, DATE_TRUNC('WEEK', current_date() + 4)::DATE - 5) < 0 THEN current_date() - 1
+      ELSE DATE_TRUNC('WEEK', review_complete_date_coalesce::DATE + 4)::DATE + 2
+    END AS week_end_date,
+    
+    -- Original Total Metrics (unsplit)
+    SUM(sla_hrs) AS sum_sla_hrs,
+    COUNT(*) AS files_reviewed,
+    SUM(CASE WHEN program_type = 'OG AUW' THEN sla_hrs END) AS og_sla_hrs,
+    SUM(CASE WHEN program_type = 'AUW Monitoring' THEN sla_hrs END) AS auw_monitoring_sla_hrs,
+    SUM(CASE WHEN program_type = 'OG AUW' THEN 1 ELSE 0 END) AS og_count,
+    SUM(CASE WHEN program_type = 'AUW Monitoring' THEN 1 ELSE 0 END) AS auw_monitoring_count,
+    MEDIAN(sla_hrs) AS median_sla_hrs,
+    MEDIAN(CASE WHEN program_type = 'OG AUW' THEN sla_hrs END) AS og_median_sla_hrs,
+    MEDIAN(CASE WHEN program_type = 'AUW Monitoring' THEN sla_hrs END) AS auw_monitoring_median_sla_hrs,
+    MEDIAN(CASE WHEN program_group = 'Reactive' THEN sla_hrs END) AS reactive_median_sla_hrs,
+    MEDIAN(CASE WHEN program_group = 'Proactive' THEN sla_hrs END) AS proactive_median_sla_hrs,
+    COUNT(DISTINCT CASE WHEN sla_hrs <= 24 THEN fundbox_id__c END) AS perc_files,
+    COUNT(DISTINCT CASE WHEN program_type = 'OG AUW' AND sla_hrs <= 24 THEN fundbox_id__c END) AS og_perc_files,
+    COUNT(DISTINCT CASE WHEN program_type = 'AUW Monitoring' AND sla_hrs <= 24 THEN fundbox_id__c END) AS auw_monitoring_perc_files,
+
+    -- OB Metrics
+    SUM(CASE WHEN program_type IN ('OB AUW','SL') THEN sla_hrs END) AS ob_sla_hrs,
+    SUM(CASE WHEN program_type IN ('OB AUW','SL') THEN 1 ELSE 0 END) AS ob_count,
+    MEDIAN(CASE WHEN program_type IN ('OB AUW','SL') THEN sla_hrs END) AS ob_median_sla_hrs,
+    COUNT(DISTINCT CASE WHEN program_type IN ('OB AUW','SL') AND sla_hrs <= 24 THEN fundbox_id__c END) AS ob_perc_files,
+
+    -- Pre-Approval Metrics
+    SUM(CASE WHEN program_type = 'Pre-Approvals' THEN sla_hrs END) AS pre_app_sla_hrs,
+    SUM(CASE WHEN program_type = 'Pre-Approvals' THEN 1 ELSE 0 END) AS pre_app_count,
+    MEDIAN(CASE WHEN program_type = 'Pre-Approvals' THEN sla_hrs END) AS pre_app_median_sla_hrs,
+    COUNT(DISTINCT CASE WHEN program_type = 'Pre-Approvals' AND sla_hrs <= 24 THEN fundbox_id__c END) AS pre_app_perc_files,
+
+    -- OB Metrics (Split)
+    SUM(CASE WHEN program_type IN ('OB AUW','SL') AND reason_for_muw = 'lemur high risk' THEN sla_hrs END) AS ob_sla_hrs_lemur,
+    SUM(CASE WHEN program_type IN ('OB AUW','SL') AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN sla_hrs END) AS ob_sla_hrs_core,
+    SUM(CASE WHEN program_type IN ('OB AUW','SL') AND reason_for_muw = 'lemur high risk' THEN 1 ELSE 0 END) AS ob_lemur_count,
+    SUM(CASE WHEN program_type IN ('OB AUW','SL') AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN 1 ELSE 0 END) AS ob_core_count,
+    MEDIAN(CASE WHEN program_type IN ('OB AUW','SL') AND reason_for_muw = 'lemur high risk' THEN sla_hrs END) AS ob_median_sla_hrs_lemur,
+    MEDIAN(CASE WHEN program_type IN ('OB AUW','SL') AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN sla_hrs END) AS ob_median_sla_hrs_core,
+    COUNT(DISTINCT CASE WHEN program_type IN ('OB AUW','SL') AND sla_hrs <= 24 AND reason_for_muw = 'lemur high risk' THEN fundbox_id__c END) AS ob_perc_files_lemur,
+    COUNT(DISTINCT CASE WHEN program_type IN ('OB AUW','SL') AND sla_hrs <= 24 AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN fundbox_id__c END) AS ob_perc_files_core,
+
+    -- Pre-Approval Metrics (Split) 
+    SUM(CASE WHEN program_type = 'Pre-Approvals' AND reason_for_muw = 'lemur high risk' THEN sla_hrs END) AS pre_app_sla_hrs_lemur,
+    SUM(CASE WHEN program_type = 'Pre-Approvals' AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN sla_hrs END) AS pre_app_sla_hrs_core,
+    SUM(CASE WHEN program_type = 'Pre-Approvals' AND reason_for_muw = 'lemur high risk' THEN 1 ELSE 0 END) AS pre_app_lemur_count,
+    SUM(CASE WHEN program_type = 'Pre-Approvals' AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN 1 ELSE 0 END) AS pre_app_core_count,
+    MEDIAN(CASE WHEN program_type = 'Pre-Approvals' AND reason_for_muw = 'lemur high risk' THEN sla_hrs END) AS pre_app_median_sla_hrs_lemur,
+    MEDIAN(CASE WHEN program_type = 'Pre-Approvals' AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN sla_hrs END) AS pre_app_median_sla_hrs_core,
+    COUNT(DISTINCT CASE WHEN program_type = 'Pre-Approvals' AND sla_hrs <= 24 AND reason_for_muw = 'lemur high risk' THEN fundbox_id__c END) AS pre_app_perc_files_lemur,
+    COUNT(DISTINCT CASE WHEN program_type = 'Pre-Approvals' AND sla_hrs <= 24 AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN fundbox_id__c END) AS pre_app_perc_files_core,
+
+    SUM(CASE WHEN program_group = 'Reactive' THEN sla_hrs END) AS reactive_sla_hrs,
+    SUM(CASE WHEN program_group = 'Proactive' THEN sla_hrs END) AS proactive_sla_hrs,
+    SUM(CASE WHEN program_group = 'Reactive' THEN 1 ELSE 0 END) AS reactive_count,
+    SUM(CASE WHEN program_group = 'Proactive' THEN 1 ELSE 0 END) AS proactive_count,
+
+    -- Marketplace SLA Metrics (TOTAL SUM)
+    SUM(CASE WHEN LOWER(marketplace) = 'lendio' THEN sla_hrs END) AS lendio_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'nav' THEN sla_hrs END) AS nav_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'bluevine' THEN sla_hrs END) AS bluevine_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'sofi' THEN sla_hrs END) AS sofi_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'fundwell' THEN sla_hrs END) AS fundwell_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'snapcap' THEN sla_hrs END) AS snapcap_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = '1west' THEN sla_hrs END) AS onewest_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'bigthink' THEN sla_hrs END) AS bigthink_sla_hrs,
+
+    -- Marketplace SLA Metrics for Pre-Approvals (SUM)
+    SUM(CASE WHEN LOWER(marketplace) = 'lendio' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_lendio_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'nav' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_nav_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'bluevine' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_bluevine_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'sofi' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_sofi_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'fundwell' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_fundwell_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'snapcap' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_snapcap_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = '1west' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_onewest_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'bigthink' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_bigthink_sla_hrs,
+    
+    -- Marketplace SLA Metrics (MEDIAN)
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'lendio' THEN sla_hrs END) AS lendio_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'nav' THEN sla_hrs END) AS nav_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'bluevine' THEN sla_hrs END) AS bluevine_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'sofi' THEN sla_hrs END) AS sofi_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'fundwell' THEN sla_hrs END) AS fundwell_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'snapcap' THEN sla_hrs END) AS snapcap_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = '1west' THEN sla_hrs END) AS onewest_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'bigthink' THEN sla_hrs END) AS bigthink_median_sla_hrs,
+
+    -- Marketplace Pre-App SLA Metrics (MEDIAN)
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'lendio' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_lendio_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'nav' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_nav_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'bluevine' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_bluevine_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'sofi' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_sofi_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'fundwell' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_fundwell_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'snapcap' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_snapcap_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = '1west' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_onewest_median_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'bigthink' AND program_type = 'Pre-Approvals' THEN sla_hrs END) AS PreAPP_bigthink_median_sla_hrs,
+
+    -- Marketplace Counts (TOTAL)
+    COUNT(CASE WHEN LOWER(marketplace) = 'lendio' THEN 1 END) AS lendio_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'nav' THEN 1 END) AS nav_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bluevine' THEN 1 END) AS bluevine_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'sofi' THEN 1 END) AS sofi_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'fundwell' THEN 1 END) AS fundwell_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'snapcap' THEN 1 END) AS snapcap_count,
+    COUNT(CASE WHEN LOWER(marketplace) = '1west' THEN 1 END) AS onewest_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bigthink' THEN 1 END) AS bigthink_count,
+
+    -- Marketplace Pre-App Counts
+    COUNT(CASE WHEN LOWER(marketplace) = 'lendio' AND program_type = 'Pre-Approvals' THEN 1 END) AS PreAPP_lendio_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'nav' AND program_type = 'Pre-Approvals' THEN 1 END) AS PreAPP_nav_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bluevine' AND program_type = 'Pre-Approvals' THEN 1 END) AS PreAPP_bluevine_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'sofi' AND program_type = 'Pre-Approvals' THEN 1 END) AS PreAPP_sofi_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'fundwell' AND program_type = 'Pre-Approvals' THEN 1 END) AS PreAPP_fundwell_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'snapcap' AND program_type = 'Pre-Approvals' THEN 1 END) AS PreAPP_snapcap_count,
+    COUNT(CASE WHEN LOWER(marketplace) = '1west' AND program_type = 'Pre-Approvals' THEN 1 END) AS PreAPP_onewest_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bigthink' AND program_type = 'Pre-Approvals' THEN 1 END) AS PreAPP_bigthink_count,
+
+    -- Pre-Approval % Completed in 4-Business Hours (per marketplace)
+    COUNT(CASE WHEN LOWER(marketplace) = 'lendio' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 4 THEN 1 END) AS PreAPP_lendio_4hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'nav' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 4 THEN 1 END) AS PreAPP_nav_4hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bluevine' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 4 THEN 1 END) AS PreAPP_bluevine_4hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'sofi' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 4 THEN 1 END) AS PreAPP_sofi_4hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'fundwell' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 4 THEN 1 END) AS PreAPP_fundwell_4hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'snapcap' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 4 THEN 1 END) AS PreAPP_snapcap_4hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = '1west' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 4 THEN 1 END) AS PreAPP_onewest_4hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bigthink' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 4 THEN 1 END) AS PreAPP_bigthink_4hr_count,
+
+    -- Pre-Approval % Completed in 8-Business Hours (per marketplace)
+    COUNT(CASE WHEN LOWER(marketplace) = 'lendio' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 8 THEN 1 END) AS PreAPP_lendio_8hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'nav' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 8 THEN 1 END) AS PreAPP_nav_8hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bluevine' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 8 THEN 1 END) AS PreAPP_bluevine_8hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'sofi' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 8 THEN 1 END) AS PreAPP_sofi_8hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'fundwell' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 8 THEN 1 END) AS PreAPP_fundwell_8hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'snapcap' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 8 THEN 1 END) AS PreAPP_snapcap_8hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = '1west' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 8 THEN 1 END) AS PreAPP_onewest_8hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bigthink' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 8 THEN 1 END) AS PreAPP_bigthink_8hr_count,
+
+    -- Pre-Approval % Completed in 12-Business Hours (per marketplace)
+    COUNT(CASE WHEN LOWER(marketplace) = 'lendio' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 12 THEN 1 END) AS PreAPP_lendio_12hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'nav' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 12 THEN 1 END) AS PreAPP_nav_12hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bluevine' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 12 THEN 1 END) AS PreAPP_bluevine_12hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'sofi' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 12 THEN 1 END) AS PreAPP_sofi_12hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'fundwell' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 12 THEN 1 END) AS PreAPP_fundwell_12hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'snapcap' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 12 THEN 1 END) AS PreAPP_snapcap_12hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = '1west' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 12 THEN 1 END) AS PreAPP_onewest_12hr_count,
+    COUNT(CASE WHEN LOWER(marketplace) = 'bigthink' AND program_type = 'Pre-Approvals' AND business_sla_hrs <= 12 THEN 1 END) AS PreAPP_bigthink_12hr_count,
+
+    ----- Business SLA HRS (Using Logic from bigthink) -----
+    SUM(business_sla_hrs) AS sum_business_sla_hrs,
+    SUM(CASE WHEN program_type = 'OG AUW' THEN business_sla_hrs END) AS og_business_sla_hrs,
+    SUM(CASE WHEN program_type = 'AUW Monitoring' THEN business_sla_hrs END) AS auw_monitoring_business_sla_hrs,
+    MEDIAN(business_sla_hrs) AS median_business_sla_hrs,
+    MEDIAN(CASE WHEN program_type = 'OG AUW' THEN business_sla_hrs END) AS og_median_business_sla_hrs,
+    MEDIAN(CASE WHEN program_type = 'AUW Monitoring' THEN business_sla_hrs END) AS auw_monitoring_median_business_sla_hrs,
+    MEDIAN(CASE WHEN program_group = 'Reactive' THEN business_sla_hrs END) AS reactive_median_business_sla_hrs,
+    MEDIAN(CASE WHEN program_group = 'Proactive' THEN business_sla_hrs END) AS proactive_median_business_sla_hrs,
+    
+    -- Keeping these commented out as requested per bigthink script
+    -- COUNT(DISTINCT CASE WHEN business_sla_hrs <= 24 THEN fundbox_id__c END) AS perc_files,
+    -- COUNT(DISTINCT CASE WHEN program_type = 'OG AUW' AND business_sla_hrs <= 24 THEN fundbox_id__c END) AS og_perc_files,
+    -- COUNT(DISTINCT CASE WHEN program_type = 'AUW Monitoring' AND business_sla_hrs <= 24 THEN fundbox_id__c END) AS auw_monitoring_perc_files,
+
+    SUM(CASE WHEN program_type IN ('OB AUW','SL') THEN business_sla_hrs END) AS ob_business_sla_hrs,
+    MEDIAN(CASE WHEN program_type IN ('OB AUW','SL') THEN business_sla_hrs END) AS ob_median_business_sla_hrs,
+
+    SUM(CASE WHEN program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS pre_app_business_sla_hrs,
+    MEDIAN(CASE WHEN program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS pre_app_median_business_sla_hrs,
+
+    -- OB Metrics Split (Business)
+    SUM(CASE WHEN program_type IN ('OB AUW','SL') AND reason_for_muw = 'lemur high risk' THEN business_sla_hrs END) AS ob_business_sla_hrs_lemur,
+    SUM(CASE WHEN program_type IN ('OB AUW','SL') AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN business_sla_hrs END) AS ob_business_sla_hrs_core,
+    MEDIAN(CASE WHEN program_type IN ('OB AUW','SL') AND reason_for_muw = 'lemur high risk' THEN business_sla_hrs END) AS ob_median_business_sla_hrs_lemur,
+    MEDIAN(CASE WHEN program_type IN ('OB AUW','SL') AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN business_sla_hrs END) AS ob_median_business_sla_hrs_core,
+
+    -- Pre-Approval Metrics Split (Business)
+    SUM(CASE WHEN program_type = 'Pre-Approvals' AND reason_for_muw = 'lemur high risk' THEN business_sla_hrs END) AS pre_app_business_sla_hrs_lemur,
+    SUM(CASE WHEN program_type = 'Pre-Approvals' AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN business_sla_hrs END) AS pre_app_business_sla_hrs_core,
+    MEDIAN(CASE WHEN program_type = 'Pre-Approvals' AND reason_for_muw = 'lemur high risk' THEN business_sla_hrs END) AS pre_app_median_business_sla_hrs_lemur,
+    MEDIAN(CASE WHEN program_type = 'Pre-Approvals' AND (reason_for_muw <> 'lemur high risk' OR reason_for_muw IS NULL) THEN business_sla_hrs END) AS pre_app_median_business_sla_hrs_core,
+
+    SUM(CASE WHEN program_group = 'Reactive' THEN business_sla_hrs END) AS reactive_business_sla_hrs,
+    SUM(CASE WHEN program_group = 'Proactive' THEN business_sla_hrs END) AS proactive_business_sla_hrs,
+  
+    -- Marketplace Business SLA Metrics (TOTAL SUM)
+    SUM(CASE WHEN LOWER(marketplace) = 'lendio' THEN business_sla_hrs END) AS lendio_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'nav' THEN business_sla_hrs END) AS nav_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'bluevine' THEN business_sla_hrs END) AS bluevine_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'sofi' THEN business_sla_hrs END) AS sofi_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'fundwell' THEN business_sla_hrs END) AS fundwell_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'snapcap' THEN business_sla_hrs END) AS snapcap_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = '1west' THEN business_sla_hrs END) AS onewest_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'bigthink' THEN business_sla_hrs END) AS bigthink_business_sla_hrs,
+
+    -- Marketplace Business SLA for Pre-Approval (SUM)
+    SUM(CASE WHEN LOWER(marketplace) = 'lendio' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreApp_lendio_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'nav' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreApp_nav_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'bluevine' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS preAPP_bluevine_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'sofi' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_sofi_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'fundwell' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_fundwell_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'snapcap' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_snapcap_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = '1west' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_onewest_business_sla_hrs,
+    SUM(CASE WHEN LOWER(marketplace) = 'bigthink' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_bigthink_business_sla_hrs,
+
+    -- Marketplace Business SLA Metrics (TOTAL MEDIAN)
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'lendio' THEN business_sla_hrs END) AS lendio_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'nav' THEN business_sla_hrs END) AS nav_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'bluevine' THEN business_sla_hrs END) AS bluevine_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'sofi' THEN business_sla_hrs END) AS sofi_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'fundwell' THEN business_sla_hrs END) AS fundwell_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'snapcap' THEN business_sla_hrs END) AS snapcap_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = '1west' THEN business_sla_hrs END) AS onewest_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'bigthink' THEN business_sla_hrs END) AS bigthink_median_business_sla_hrs,
+
+    -- Marketplace Pre-App Business SLA Metrics (MEDIAN)
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'lendio' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_lendio_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'nav' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_nav_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'bluevine' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_bluevine_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'sofi' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_sofi_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'fundwell' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_fundwell_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'snapcap' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_snapcap_median_business_sla_hrs,
+    MEDIAN(CASE WHEN LOWER(marketplace) = '1west' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_onewest_median_business_sla_hrs,  
+    MEDIAN(CASE WHEN LOWER(marketplace) = 'bigthink' AND program_type = 'Pre-Approvals' THEN business_sla_hrs END) AS PreAPP_bigthink_median_business_sla_hrs
+
+  FROM (
+    -- INNER SUBQUERY
+    SELECT
+      fundbox_id__c,
+      recordtypeid,
+      status__c,
+      CASE
+        WHEN recordtypeid = '012Rd000000AcjxIAC' THEN 'OB AUW'
+        WHEN recordtypeid = '0124T000000DSMTQA4' THEN 'SL'
+        WHEN recordtypeid = '012Rd000000jbbJIAQ' THEN 'Pre-Approvals'
+        WHEN recordtypeid IN ('012Rd000001B2txIAC', '012Rd000002EppVIAS') THEN 'OG AUW'
+        WHEN recordtypeid = '012Rd000002Dp5CIAS' THEN 'AUW Monitoring'
+        ELSE 'Other'
+      END AS program_type,
+      CASE
+        WHEN recordtypeid IN ('012Rd000000AcjxIAC', '0124T000000DSMTQA4', '012Rd000000jbbJIAQ') THEN 'Reactive'
+        WHEN recordtypeid IN ('012Rd000001B2txIAC', '012Rd000002EppVIAS', '012Rd000002Dp5CIAS') THEN 'Proactive'
+        ELSE 'Other'
+      END AS program_group,
+      CASE
+        WHEN recordtypeid = '012Rd000000AcjxIAC' THEN b.first_approved_credit_limit
+        WHEN recordtypeid = '0124T000000DSMTQA4' THEN sl.automated_cl
+        WHEN recordtypeid = '012Rd000000jbbJIAQ' THEN l.automated_cl_pa
+        WHEN recordtypeid IN ('012Rd000001B2txIAC', '012Rd000002EppVIAS', '012Rd000002Dp5CIAS') THEN t1.credit_limit
+        ELSE c.credit_limit
+      END AS credit_limit_filled,
+      CASE
+        WHEN recordtypeid = '0124T000000DSMTQA4' THEN sl.first_approved_credit_limit
+        WHEN recordtypeid = '012Rd000000jbbJIAQ' THEN l.auw_approved_limit_pa
+        WHEN (recordtypeid = '012Rd000002Dp5CIAS' AND status__c IN ('Close Account', 'RMR/Disable')) THEN 0
+        WHEN recordtypeid IN ('012Rd000001B2txIAC', '012Rd000002EppVIAS', '012Rd000002Dp5CIAS') THEN t2.credit_limit
+        ELSE COALESCE(A.approved_uw_credit_limit__c, 0)
+      END AS approved_uw_credit_limit,
+      CASE
+        WHEN recordtypeid = '012Rd000002Dp5CIAS' THEN
+          CASE
+            WHEN status__c = 'Complete - Current CL' THEN 'No change'
+            WHEN status__c = 'Reduce CL' THEN 'Decrease'
+            WHEN status__c IN ('Close Account', 'RMR/Disable') THEN 'Close/RMR/Disable'
+            ELSE status__c
+          END
+        ELSE
+          CASE
+            WHEN approved_uw_credit_limit > credit_limit_filled THEN 'Increase'
+            WHEN approved_uw_credit_limit < credit_limit_filled AND approved_uw_credit_limit <> 0 THEN 'Decrease'
+            WHEN approved_uw_credit_limit = credit_limit_filled THEN 'No change'
+            WHEN approved_uw_credit_limit = 0 THEN 'Rejected'
+            ELSE 'Other'
+          END
+      END AS decision_type,
+      review_start_time__c::DATE AS review_start_date,
+      review_complete_time__c::DATE AS review_complete_date,
+      auw_pre_doc_review_complete_time__c::DATE AS auw_pre_doc_review_complete_date,
+      COALESCE(review_complete_time__c, auw_pre_doc_review_complete_time__c) AS review_complete_time_coalesce,
+      COALESCE (ready_for_uw_start_time__c , createddate) AS review_start_time_coalesce,
+      COALESCE(review_complete_time__c::DATE, auw_pre_doc_review_complete_time__c::DATE) AS review_complete_date_coalesce,
+      TIMESTAMPDIFF(MINUTE, review_start_time_coalesce, review_complete_time_coalesce) AS sla_minutes,
+      sla_minutes / 60 AS sla_hrs,
+
+      -- Business Hours SLA Calculation (9am-6pm EST, Mon-Fri, excluding US holidays from CTE)
+      CONVERT_TIMEZONE('America/New_York', review_start_time_coalesce) AS start_est,
+      CONVERT_TIMEZONE('America/New_York', review_complete_time_coalesce) AS end_est,
+
+      CASE 
+          WHEN start_est IS NULL OR end_est IS NULL THEN NULL
+          -- RULE 1: Start after hours/weekend/holiday AND end before 9AM/weekend/holiday AND no business days in between → 10 min
+          WHEN (DAYOFWEEK(start_est::DATE) IN (0,6) OR start_est::DATE IN (SELECT holiday_date FROM us_holidays) OR EXTRACT(HOUR FROM start_est) >= 18 OR EXTRACT(HOUR FROM start_est) < 9) 
+               AND (DAYOFWEEK(end_est::DATE) IN (0,6) OR end_est::DATE IN (SELECT holiday_date FROM us_holidays) OR EXTRACT(HOUR FROM end_est) < 9) 
+               AND (GREATEST(0, (DATEDIFF('day', start_est::DATE, end_est::DATE) - 1 - (DATEDIFF('week', start_est::DATE, end_est::DATE) * 2) 
+               + CASE WHEN DAYOFWEEK(start_est::DATE) = 0 THEN 1 ELSE 0 END + CASE WHEN DAYOFWEEK(start_est::DATE) = 6 THEN 1 ELSE 0 END 
+               + CASE WHEN DAYOFWEEK(end_est::DATE) = 0 THEN 1 ELSE 0 END + CASE WHEN DAYOFWEEK(end_est::DATE) = 6 THEN 1 ELSE 0 END
+               - (CASE WHEN '2026-01-19' > start_est::DATE AND '2026-01-19' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-02-16' > start_est::DATE AND '2026-02-16' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-05-25' > start_est::DATE AND '2026-05-25' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-06-19' > start_est::DATE AND '2026-06-19' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-07-03' > start_est::DATE AND '2026-07-03' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-09-07' > start_est::DATE AND '2026-09-07' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-11-26' > start_est::DATE AND '2026-11-26' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-11-27' > start_est::DATE AND '2026-11-27' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-12-24' > start_est::DATE AND '2026-12-24' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-12-25' > start_est::DATE AND '2026-12-25' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-12-31' > start_est::DATE AND '2026-12-31' < end_est::DATE THEN 1 ELSE 0 END)))) = 0 
+          THEN 10.0 / 60.0
+          -- RULE 1b: Start after hours/weekend/holiday AND end before 9AM/weekend/holiday BUT has business days in between
+          WHEN (DAYOFWEEK(start_est::DATE) IN (0,6) OR start_est::DATE IN (SELECT holiday_date FROM us_holidays) OR EXTRACT(HOUR FROM start_est) >= 18 OR EXTRACT(HOUR FROM start_est) < 9) 
+               AND (DAYOFWEEK(end_est::DATE) IN (0,6) OR end_est::DATE IN (SELECT holiday_date FROM us_holidays) OR EXTRACT(HOUR FROM end_est) < 9) 
+          THEN (GREATEST(0, (DATEDIFF('day', start_est::DATE, end_est::DATE) - 1 - (DATEDIFF('week', start_est::DATE, end_est::DATE) * 2) 
+               + CASE WHEN DAYOFWEEK(start_est::DATE) = 0 THEN 1 ELSE 0 END + CASE WHEN DAYOFWEEK(start_est::DATE) = 6 THEN 1 ELSE 0 END 
+               + CASE WHEN DAYOFWEEK(end_est::DATE) = 0 THEN 1 ELSE 0 END + CASE WHEN DAYOFWEEK(end_est::DATE) = 6 THEN 1 ELSE 0 END
+               - (CASE WHEN '2026-01-19' > start_est::DATE AND '2026-01-19' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-02-16' > start_est::DATE AND '2026-02-16' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-05-25' > start_est::DATE AND '2026-05-25' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-06-19' > start_est::DATE AND '2026-06-19' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-07-03' > start_est::DATE AND '2026-07-03' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-09-07' > start_est::DATE AND '2026-09-07' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-11-26' > start_est::DATE AND '2026-11-26' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-11-27' > start_est::DATE AND '2026-11-27' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-12-24' > start_est::DATE AND '2026-12-24' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-12-25' > start_est::DATE AND '2026-12-25' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-12-31' > start_est::DATE AND '2026-12-31' < end_est::DATE THEN 1 ELSE 0 END)))) * 9.0
+          -- RULE 2: Same day, not weekend/holiday, both within 9AM-6PM → simple subtraction
+          WHEN start_est::DATE = end_est::DATE AND DAYOFWEEK(start_est::DATE) NOT IN (0,6) AND start_est::DATE NOT IN (SELECT holiday_date FROM us_holidays) AND EXTRACT(HOUR FROM start_est) >= 9 AND EXTRACT(HOUR FROM start_est) < 18 AND EXTRACT(HOUR FROM end_est) >= 9 AND EXTRACT(HOUR FROM end_est) <= 18
+          THEN (EXTRACT(HOUR FROM end_est) + EXTRACT(MINUTE FROM end_est)/60.0) - (EXTRACT(HOUR FROM start_est) + EXTRACT(MINUTE FROM start_est)/60.0)
+          -- RULE 3: Same day, not weekend/holiday, start within hours, end after 6PM → cap end at 6PM
+          WHEN start_est::DATE = end_est::DATE AND DAYOFWEEK(start_est::DATE) NOT IN (0,6) AND start_est::DATE NOT IN (SELECT holiday_date FROM us_holidays) AND EXTRACT(HOUR FROM start_est) >= 9 AND EXTRACT(HOUR FROM start_est) < 18 AND EXTRACT(HOUR FROM end_est) >= 18
+          THEN 18 - (EXTRACT(HOUR FROM start_est) + EXTRACT(MINUTE FROM start_est)/60.0)
+          -- RULE 4: Same day, not weekend/holiday, start before 9AM, end within hours → start at 9AM
+          WHEN start_est::DATE = end_est::DATE AND DAYOFWEEK(start_est::DATE) NOT IN (0,6) AND start_est::DATE NOT IN (SELECT holiday_date FROM us_holidays) AND EXTRACT(HOUR FROM start_est) < 9 AND EXTRACT(HOUR FROM end_est) >= 9 AND EXTRACT(HOUR FROM end_est) <= 18
+          THEN (EXTRACT(HOUR FROM end_est) + EXTRACT(MINUTE FROM end_est)/60.0) - 9
+          -- RULE 5: Same day, not weekend/holiday, spans entire business day (before 9AM to after 6PM) → 9 hours
+          WHEN start_est::DATE = end_est::DATE AND DAYOFWEEK(start_est::DATE) NOT IN (0,6) AND start_est::DATE NOT IN (SELECT holiday_date FROM us_holidays) AND EXTRACT(HOUR FROM start_est) < 9 AND EXTRACT(HOUR FROM end_est) >= 18
+          THEN 9.0
+          -- MULTI-DAY CASES
+          ELSE (
+              -- Hours from START day (0 if weekend or holiday)
+              CASE WHEN DAYOFWEEK(start_est::DATE) IN (0,6) OR start_est::DATE IN (SELECT holiday_date FROM us_holidays) THEN 0 WHEN EXTRACT(HOUR FROM start_est) >= 18 THEN 0 WHEN EXTRACT(HOUR FROM start_est) < 9 THEN 9.0 ELSE 18.0 - (EXTRACT(HOUR FROM start_est) + EXTRACT(MINUTE FROM start_est)/60.0) END
+              -- Full business days in between × 9 hours (minus weekends and holidays)
+              + GREATEST(0, (DATEDIFF('day', start_est::DATE, end_est::DATE) - 1 - (DATEDIFF('week', start_est::DATE, end_est::DATE) * 2) 
+               + CASE WHEN DAYOFWEEK(start_est::DATE) = 0 THEN 1 ELSE 0 END + CASE WHEN DAYOFWEEK(start_est::DATE) = 6 THEN 1 ELSE 0 END 
+               + CASE WHEN DAYOFWEEK(end_est::DATE) = 0 THEN 1 ELSE 0 END + CASE WHEN DAYOFWEEK(end_est::DATE) = 6 THEN 1 ELSE 0 END
+               - (CASE WHEN '2026-01-19' > start_est::DATE AND '2026-01-19' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-02-16' > start_est::DATE AND '2026-02-16' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-05-25' > start_est::DATE AND '2026-05-25' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-06-19' > start_est::DATE AND '2026-06-19' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-07-03' > start_est::DATE AND '2026-07-03' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-09-07' > start_est::DATE AND '2026-09-07' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-11-26' > start_est::DATE AND '2026-11-26' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-11-27' > start_est::DATE AND '2026-11-27' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-12-24' > start_est::DATE AND '2026-12-24' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-12-25' > start_est::DATE AND '2026-12-25' < end_est::DATE THEN 1 ELSE 0 END + CASE WHEN '2026-12-31' > start_est::DATE AND '2026-12-31' < end_est::DATE THEN 1 ELSE 0 END))) * 9.0
+              -- Hours from END day (0 if weekend or holiday)
+              + CASE WHEN DAYOFWEEK(end_est::DATE) IN (0,6) OR end_est::DATE IN (SELECT holiday_date FROM us_holidays) THEN 0 WHEN EXTRACT(HOUR FROM end_est) < 9 THEN 0 WHEN EXTRACT(HOUR FROM end_est) >= 18 THEN 9.0 ELSE (EXTRACT(HOUR FROM end_est) + EXTRACT(MINUTE FROM end_est)/60.0) - 9.0 END
+          )
+      END AS business_sla_hrs,
+
+      CASE 
+        WHEN SL.automated_cl >= 70000 THEN 'high line'
+        WHEN SL.automated_cl >= 15000 AND LEFT(B.zip_code, 2) IN ('91', '92', '93') THEN 'zip'
+        WHEN SL.automated_cl >= 15000 AND LEFT(B.industry_naics_code, 2) = '48' THEN 'naics'
+        WHEN lrl.risk_level IN (5) AND SL.automated_cl BETWEEN 30000 AND 49999.99 THEN 'lemur high risk'
+        WHEN lrl.risk_level IN (4, 5) AND SL.automated_cl BETWEEN 50000 AND 69999.99 THEN 'lemur high risk'
+      END AS reason_for_muw,
+
+      CASE WHEN cld.termunits IS NOT NULL THEN cld.termunits ELSE A.partner_name__c END AS marketplace
+      
+    FROM external_data_sources.salesforce_nova.loan__c A
+    LEFT JOIN bi.public.customers_data b ON b.fbbid = a.fundbox_id__c
+    LEFT JOIN bi.public.daily_approved_customers_data c ON c.fbbid = a.fundbox_id__c AND a.createddate::DATE = c.edate
+    LEFT JOIN analytics.credit.second_look_accounts sl ON a.fundbox_id__c = sl.fbbid
+    LEFT JOIN (SELECT fbbid, partner_name, calculated_annual_revenue AS calculated_annual_revenue_pa,
+                      pre_approval_amount AS automated_cl_pa, auw_approved_limit AS auw_approved_limit_pa
+              FROM bi.customers.leads_data
+    ) l ON l.fbbid = a.fundbox_id__c AND a.recordtypeid = '012Rd000000jbbJIAQ'
+    LEFT JOIN (SELECT fbbid, credit_limit, edate FROM bi.public.daily_approved_customers_data) t1
+      ON a.fundbox_id__c = t1.fbbid AND a.review_complete_time__c::DATE = DATEADD(day, 1, t1.edate) AND a.recordtypeid IN ('012Rd000001B2txIAC', '012Rd000002EppVIAS', '012Rd000002Dp5CIAS')
+    LEFT JOIN (SELECT fbbid, credit_limit, edate FROM bi.public.daily_approved_customers_data) t2
+      ON a.fundbox_id__c = t2.fbbid AND a.review_complete_time__c::DATE = DATEADD(day, -1, t2.edate) AND a.recordtypeid IN ('012Rd000001B2txIAC', '012Rd000002EppVIAS', '012Rd000002Dp5CIAS')
+    LEFT JOIN (SELECT DISTINCT fbbid, termunits FROM analytics.credit.customer_level_data_td) cld
+      ON a.fundbox_id__c = cld.fbbid
+    LEFT JOIN (
+      SELECT * FROM cdc_v2.risk.llm_risk_level
+      QUALIFY ROW_NUMBER() OVER (PARTITION BY fbbid ORDER BY decision_time DESC) = 1
+    ) lrl
+      ON A.FUNDBOX_ID__C = lrl.fbbid
+      
+    WHERE (review_complete_time__c IS NOT NULL OR auw_pre_doc_review_complete_time__c IS NOT NULL)
+      AND recordtypeid IN ('012Rd000000AcjxIAC','0124T000000DSMTQA4','012Rd000000jbbJIAQ',
+                           '012Rd000001B2txIAC','012Rd000002EppVIAS','012Rd000002Dp5CIAS')
+      AND fundbox_id__c NOT IN (999999999999999910, 9987800100888)  
+  ) c
+  GROUP BY 1;
+
+

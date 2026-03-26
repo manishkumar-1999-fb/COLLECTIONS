@@ -1,0 +1,44 @@
+COLLECTIONS HEADCOUNT MODEL - SCENARIO ANALYSIS TAB
+====================================================
+
+SCENARIO PARAMETERS
+===================
+PARAMETER,OPTIMISTIC,BASE,PESSIMISTIC,NOTES
+Volume Multiplier,0.90,1.00,1.15,"Factor applied to projected account volume"
+Productivity Multiplier,1.10,1.00,0.90,"Factor applied to agent productivity"
+Connect Rate Adjustment,+2%,0%,-2%,"Adjustment to connect rate assumption"
+AHT Adjustment,-0.5 min,0 min,+1 min,"Adjustment to AHT assumption"
+Buffer %,10%,15%,20%,"Coverage buffer for PTO/attrition"
+
+SCENARIO RESULTS - COLLECTIONS
+==============================
+METRIC,OPTIMISTIC,BASE,PESSIMISTIC
+Adjusted Projected Accounts,[Base × 0.90],[Base × 1.00],[Base × 1.15]
+Adjusted Work Hours,[Calc],[Calc],[Calc]
+Adjusted Capacity per Agent,[Base × 1.10],[Base × 1.00],[Base × 0.90]
+Headcount Needed,[=Work Hrs/Capacity],[=Work Hrs/Capacity],[=Work Hrs/Capacity]
+Headcount with Buffer,[=Needed × (1+Buffer)],[=Needed × (1+Buffer)],[=Needed × (1+Buffer)]
+Current Headcount,[Same],[Same],[Same]
+Gap,[=Current - Needed],[=Current - Needed],[=Current - Needed]
+Hiring Recommendation,,[Negative = Hire; Positive = Overstaffed],
+
+SCENARIO RESULTS - ILR
+======================
+METRIC,OPTIMISTIC,BASE,PESSIMISTIC
+Adjusted Projected Accounts,[Base × 0.90],[Base × 1.00],[Base × 1.15]
+Adjusted Work Hours,[Calc],[Calc],[Calc]
+Adjusted Capacity per Agent,[Base × 1.10],[Base × 1.00],[Base × 0.90]
+Headcount Needed,[=Work Hrs/Capacity],[=Work Hrs/Capacity],[=Work Hrs/Capacity]
+Headcount with Buffer,[=Needed × (1+Buffer)],[=Needed × (1+Buffer)],[=Needed × (1+Buffer)]
+Current Headcount,[Same],[Same],[Same]
+Gap,[=Current - Needed],[=Current - Needed],[=Current - Needed]
+Hiring Recommendation,,[Negative = Hire; Positive = Overstaffed],
+
+COMBINED SUMMARY
+================
+METRIC,OPTIMISTIC,BASE,PESSIMISTIC
+Total Headcount Needed,[Sum],[Sum],[Sum]
+Total with Buffer,[Sum],[Sum],[Sum]
+Total Current,[Sum],[Sum],[Sum]
+Total Gap,[Sum],[Sum],[Sum]
+Variance from Base,,[Reference],
