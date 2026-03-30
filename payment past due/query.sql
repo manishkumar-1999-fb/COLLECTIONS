@@ -405,8 +405,6 @@ past_due_updated_logic as past_due_payment_updated_logic_2changes,
 case 
     when (past_due_updated_logic is null or past_due_updated_logic = 0) 
     and call_result = 'payment' and look_back <=15 and custom_plan = 0 then OCP_payment
-    -- when (past_due_updated_logic is null or past_due_updated_logic = 0) 
-    -- and call_result = 'payment' and custom_plan = 1 and look_back<=30 then OCP_payment
     when (past_due_updated_logic is null or past_due_updated_logic = 0) 
     and call_result = 'promise to pay' and look_back <=15 then OCP_payment
 else past_due_updated_logic
@@ -416,25 +414,6 @@ from With_ocp_Payments;
 
 
 
--- Select * from analytics.credit.agent_collection_mk_v3
--- WHERE PAST_DUE_PAYMENT_UPDATED_LOGIC IS NOT NULL AND CUSTOM_PLAN = 0
--- WHERE FBBID = 364617
--- ORDER BY TRANSACTION_TRANSMISSION_TIME;
 
-
-
-SELECT 
-FBBID,
-PAYMENT_EVENT_TIME,
-LOAN_KEY,
-RELATED_SERVICE_ID,
-TO_DOUBLE(PAYMENT_COMPONENTS_JSON:PAYMENT_AMOUNT)   AS payment_total_amount,
-FROM BI.FINANCE.PAYMENTS_MODEL
-WHERE 
---LOAN_KEY = 1750342
-FBBID = 2000627
-AND PAYMENT_STATUS = 'FUND'
-AND DIRECTION = 'D' AND PARENT_PAYMENT_ID IS NOT NULL
-ORDER BY PAYMENT_EVENT_TIME,RELATED_SERVICE_ID;
 
 
