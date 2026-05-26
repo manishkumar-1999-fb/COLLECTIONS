@@ -777,30 +777,63 @@ left join Total_os b
 on a.week_end_date = b.collection_week;
 
 
----Settlement 
+-- ============================================================
+-- PATCH: km_collections_preco_settlements
+-- Fix: week bucketing — anchor on DATE_OF_SETTLEMENT_ARRANGEMENT
+--      FROM_DATE instead of cfs.edate (the amount row date).
+-- Affected account from validation: 321967 (Bucket 9-13)
+--   KM had it in week 2026-04-29; correct week is 2026-05-13
+-- Scope: Pre-CO only (Bucket 1-2, 3-8, 9-13)
+-- ============================================================
+
 CREATE OR REPLACE TABLE analytics.credit.km_collections_preco_settlements AS
-WITH all_offers AS (
-    SELECT 
+
+WITH arrangement_anchor AS (
+    -- True settlement creation date per fbbid from the arrangement row.
+    -- Use this for week bucketing — NOT the amount row edate.
+    SELECT
+        FBBID,
+        FROM_DATE AS settlement_created_date,
+        LEAD(FROM_DATE) OVER (PARTITION BY FBBID ORDER BY FROM_DATE) AS next_settlement_date
+    FROM bi.finance.customer_finance_statuses
+    WHERE STATUS_GROUP = 'DISCOUNTED_SETTLEMENT'
+      AND STATUS_NAME  = 'DATE_OF_SETTLEMENT_ARRANGEMENT'
+),
+
+all_offers AS (
+    SELECT
         cfs.fbbid,
-        DATE_TRUNC('WEEK', cfs.edate::DATE + 4)::DATE + 2 AS week_end_date,
-        DATEADD(day,-6, DATE_TRUNC('WEEK', cfs.edate::DATE + 4)::DATE + 2) AS week_start_date,
+        -- ✅ FIX: use arrangement_created_date for week bucketing, not cfs.edate
+        COALESCE(aa.settlement_created_date, cfs.edate)              AS settlement_created_date,
+        DATE_TRUNC('WEEK',
+            COALESCE(aa.settlement_created_date, cfs.edate)::DATE + 4
+        )::DATE + 2                                                  AS week_end_date,
+        DATEADD(day, -6,
+            DATE_TRUNC('WEEK',
+                COALESCE(aa.settlement_created_date, cfs.edate)::DATE + 4
+            )::DATE + 2
+        )                                                            AS week_start_date,
         cfs.edate,
         cfs.status_name,
-        CASE WHEN cfs.status_name = 'SETTLEMENT_STATUS' 
+        CASE WHEN cfs.status_name = 'SETTLEMENT_STATUS'
                   AND cfs.status_value = 'FUNDED' THEN cfs.status_value END AS settlement_status_funded,
-        CASE WHEN cfs.status_name = 'FINAL_SETTLEMENT_AMOUNT' 
+        CASE WHEN cfs.status_name = 'FINAL_SETTLEMENT_AMOUNT'
                   THEN cfs.status_value::NUMERIC * COALESCE(fcu.fx_rate, 1.0) END AS settlement_amount
     FROM bi.finance.customer_finance_statuses cfs
     LEFT JOIN INDUS.PUBLIC.FX_CUSTOMER_UNIFIED fcu
         ON fcu.FBBID = cfs.FBBID
         AND fcu.EXCHANGE_DATE = cfs.EDATE::DATE
+    -- ✅ FIX: join arrangement anchor to get true creation date
+    LEFT JOIN arrangement_anchor aa
+        ON aa.FBBID = cfs.FBBID
+        AND cfs.edate >= aa.settlement_created_date
+        AND cfs.edate  < COALESCE(aa.next_settlement_date, '9999-01-01')
     WHERE cfs.status_group = 'DISCOUNTED_SETTLEMENT'
       AND (
             cfs.status_name = 'FINAL_SETTLEMENT_AMOUNT'
          OR cfs.status_name = 'SETTLEMENT_STATUS'
       )
 ),
--- select * from all_offers where week_end_Date = '2025-07-09';
 
 funded_settlements AS (
     SELECT
@@ -831,7 +864,7 @@ offers_agg AS (
         a1.settlement_amount,
         a2.dpd_days,
         a2.is_chargeoff,
-        CASE 
+        CASE
             WHEN dpd_days IS NULL AND is_chargeoff = 0 THEN 0
             WHEN dpd_days IS NULL AND is_chargeoff = 1 THEN 98
             ELSE dpd_days
@@ -843,22 +876,22 @@ offers_agg AS (
             WHEN dpd_days_corrected BETWEEN 57 AND 91 AND is_chargeoff = 0 THEN '03. Bucket 9-13'
             WHEN dpd_days_corrected <= 98 AND is_chargeoff = 1 THEN '04. CHOF'
         END AS dpd_bucket_group,
-        CASE 
-            WHEN fs.fbbid IS NOT NULL 
+        CASE
+            WHEN fs.fbbid IS NOT NULL
                  AND a1.edate = fs.final_amount_edate THEN 1
             ELSE 0
         END AS is_completed
     FROM all_offers a1
-    LEFT JOIN bi.public.daily_approved_customers_data a2 
-           ON a1.fbbid = a2.fbbid 
+    LEFT JOIN bi.public.daily_approved_customers_data a2
+           ON a1.fbbid = a2.fbbid
           AND a1.edate = a2.edate - 1
-    LEFT JOIN funded_settlements fs 
-           ON a1.fbbid = fs.fbbid 
+    LEFT JOIN funded_settlements fs
+           ON a1.fbbid = fs.fbbid
           AND a1.edate = fs.final_amount_edate
     WHERE a1.settlement_amount IS NOT NULL
 )
 
-SELECT 
+SELECT
     week_start_date,
     week_end_date,
 
@@ -866,21 +899,21 @@ SELECT
     COUNT(DISTINCT CASE WHEN dpd_bucket_group = '02. Bucket 3-8' THEN fbbid END) AS preco_num_settlements_3_8,
     COUNT(DISTINCT CASE WHEN dpd_bucket_group = '03. Bucket 9-13' THEN fbbid END) AS preco_num_settlements_9_13,
 
-    COALESCE(SUM(DISTINCT CASE WHEN dpd_bucket_group = '01. Bucket 1-2' THEN settlement_amount END),0) AS preco_amt_settlements_1_2,
-    COALESCE(SUM(DISTINCT CASE WHEN dpd_bucket_group = '02. Bucket 3-8' THEN settlement_amount END),0) AS preco_amt_settlements_3_8,
-    COALESCE(SUM(DISTINCT CASE WHEN dpd_bucket_group = '03. Bucket 9-13' THEN settlement_amount END),0) AS preco_amt_settlements_9_13,
+    COALESCE(SUM(DISTINCT CASE WHEN dpd_bucket_group = '01. Bucket 1-2' THEN settlement_amount END), 0) AS preco_amt_settlements_1_2,
+    COALESCE(SUM(DISTINCT CASE WHEN dpd_bucket_group = '02. Bucket 3-8' THEN settlement_amount END), 0) AS preco_amt_settlements_3_8,
+    COALESCE(SUM(DISTINCT CASE WHEN dpd_bucket_group = '03. Bucket 9-13' THEN settlement_amount END), 0) AS preco_amt_settlements_9_13,
 
     COUNT(DISTINCT CASE WHEN is_completed = 1 AND dpd_bucket_group = '01. Bucket 1-2' THEN fbbid END) AS preco_num_completed_settlements_1_2,
     COUNT(DISTINCT CASE WHEN is_completed = 1 AND dpd_bucket_group = '02. Bucket 3-8' THEN fbbid END) AS preco_num_completed_settlements_3_8,
     COUNT(DISTINCT CASE WHEN is_completed = 1 AND dpd_bucket_group = '03. Bucket 9-13' THEN fbbid END) AS preco_num_completed_settlements_9_13,
 
-    COALESCE(SUM(DISTINCT CASE WHEN is_completed = 1 AND dpd_bucket_group = '01. Bucket 1-2' THEN settlement_amount END),0) AS preco_amt_completed_settlements_1_2,
-    COALESCE(SUM(DISTINCT CASE WHEN is_completed = 1 AND dpd_bucket_group = '02. Bucket 3-8' THEN settlement_amount END),0) AS preco_amt_completed_settlements_3_8,
-    COALESCE(SUM(DISTINCT CASE WHEN is_completed = 1 AND dpd_bucket_group = '03. Bucket 9-13' THEN settlement_amount END),0) AS preco_amt_completed_settlements_9_13,
+    COALESCE(SUM(DISTINCT CASE WHEN is_completed = 1 AND dpd_bucket_group = '01. Bucket 1-2' THEN settlement_amount END), 0) AS preco_amt_completed_settlements_1_2,
+    COALESCE(SUM(DISTINCT CASE WHEN is_completed = 1 AND dpd_bucket_group = '02. Bucket 3-8' THEN settlement_amount END), 0) AS preco_amt_completed_settlements_3_8,
+    COALESCE(SUM(DISTINCT CASE WHEN is_completed = 1 AND dpd_bucket_group = '03. Bucket 9-13' THEN settlement_amount END), 0) AS preco_amt_completed_settlements_9_13
 
 FROM offers_agg
-GROUP BY 1,2
-ORDER BY 1,2;
+GROUP BY 1, 2
+ORDER BY 1, 2;
 
 
 -- ============================================================================================================
@@ -1144,10 +1177,8 @@ co_fbbid_weekly AS (
         fbbid,
         edate AS week_end_date,
         CASE 
-            WHEN RECOVERY_SUGGESTED_STATE IN ('ILR', 'LR', 'ER', 'FB_TL', 'CB_DLQ', 'HEAL', 'TR_ILR', 'EOL', 'PRELIT', 'LPD', 'MCA_HE') 
-                 OR RECOVERY_SUGGESTED_STATE IS NULL THEN 'Internal'
-            WHEN RECOVERY_SUGGESTED_STATE IN ('ELR', 'PROLIT', 'TR_LR') THEN 'External'
-            ELSE 'Unknown'
+            WHEN recovery_suggested_substate IN ('3RD_P_SOLD', 'ASPIRE_LAW', 'BK_BL', 'EVANS_MUL', 'LP_HARVEST', 'LP_WELTMAN', 'MRS_PRIM', 'MRS_SEC', 'PB_CAP_PR', 'PB_CAPITAL', 'SEQ_PRIM', 'SEQ_SEC') THEN 'External'
+            ELSE 'Internal'
         END AS placement_status,
         CASE 
             WHEN recovery_suggested_substate IN ('3RD_P_SOLD') THEN 'SCJ'
@@ -1253,7 +1284,7 @@ sum(TO_DOUBLE(pm.PAYMENT_COMPONENTS_JSON:PAYMENT_AMOUNT) * COALESCE(flu_pay.loan
 from bi.finance.payments_model pm
 LEFT JOIN INDUS.PUBLIC.FX_LOAN_UNIFIED flu_pay ON flu_pay.LOAN_KEY = pm.LOAN_KEY
 where pm.payment_status = 'FUND' 
-and pm.payment_event_time >='2020-01-01' and pm.parent_payment_id is not null
+and pm.payment_event_time >='2024-01-01' and pm.LOAN_KEY is not null
 group by pm.FBBID, pm.originator, date(pm.payment_event_time)
 )
 -- where originator ilike 'SEQ' and last_day(payment_event_time) = '2025-07-31';
@@ -1268,7 +1299,8 @@ with_payments as
     from base_data a
     left join payments b
     on a.fbbid = b.fbbid 
-    and (b.payment_event_time > a.transfer_date and b.payment_event_time<= a.next_transfer_date)
+    and (b.payment_event_time >= a.transfer_date and b.payment_event_time<= a.next_transfer_date)
+    qualify row_number() over(partition by a.fbbid, b.payment_event_time order by b.payment_event_time) = 1
 )
 --select * from with_payments where fbbid = 529351;
 ,
@@ -1282,7 +1314,10 @@ final_data as
     Outstanding_principal,fees_due,discount_pending,transfer_balance,
     vendor_name,
     originator,
-    DATE_TRUNC('WEEK', payment_event_time::DATE + 4)::DATE + 2 AS week_end_date,
+    CASE 
+        WHEN vendor_name = 'SCJ' THEN DATE_TRUNC('WEEK', transfer_date::DATE + 4)::DATE + 2
+        ELSE DATE_TRUNC('WEEK', payment_event_time::DATE + 4)::DATE + 2 
+    END AS week_end_date,
     case 
     when originator in ('B&L','BL') then 'BL'
     when originator ilike '%HARVEST%' then 'Harvest'
@@ -1342,11 +1377,8 @@ from
             dacd_ri.discount_pending * COALESCE(fcu_ri.fx_rate, 1.0) AS discount_pending,
             (dacd_ri.outstanding_principal + dacd_ri.fees_due - dacd_ri.discount_pending) * COALESCE(fcu_ri.fx_rate, 1.0) AS transfer_balance,
             CASE 
-            WHEN dacd_ri.RECOVERY_SUGGESTED_STATE IN ('ILR', 'LR', 'ER', 'FB_TL', 'CB_DLQ', 'HEAL', 'TR_ILR', 'EOL', 'PRELIT', 'LPD', 'MCA_HE') 
-                 OR dacd_ri.RECOVERY_SUGGESTED_STATE IS NULL THEN 'Internal'
-            WHEN dacd_ri.RECOVERY_SUGGESTED_STATE IN ('ELR') THEN 'External'
-            when dacd_ri.recovery_suggested_state in ('PROLIT', 'TR_LR') then 'External_pro_tr'
-            ELSE 'Unknown'
+            WHEN dacd_ri.recovery_suggested_substate IN ('3RD_P_SOLD', 'ASPIRE_LAW', 'BK_BL', 'EVANS_MUL', 'LP_HARVEST', 'LP_WELTMAN', 'MRS_PRIM', 'MRS_SEC', 'PB_CAP_PR', 'PB_CAPITAL', 'SEQ_PRIM', 'SEQ_SEC') THEN 'External'
+            ELSE 'Internal'
         END AS placement_status,
             LAG(placement_status) OVER (PARTITION BY dacd_ri.fbbid ORDER BY dacd_ri.edate ASC) AS prev_status
         FROM bi.public.daily_approved_customers_data dacd_ri
@@ -1370,7 +1402,7 @@ sum(TO_DOUBLE(pm_i.PAYMENT_COMPONENTS_JSON:PAYMENT_AMOUNT) * COALESCE(flu_pi.loa
 from bi.finance.payments_model pm_i
 LEFT JOIN INDUS.PUBLIC.FX_LOAN_UNIFIED flu_pi ON flu_pi.LOAN_KEY = pm_i.LOAN_KEY
 where pm_i.payment_status = 'FUND' 
-and pm_i.payment_event_time >='2020-01-01' and pm_i.parent_payment_id is not null
+and pm_i.payment_event_time >='2024-01-01' and pm_i.LOAN_KEY is not null
 group by pm_i.FBBID, pm_i.originator, date(pm_i.payment_event_time)
 )
 ,
@@ -1382,7 +1414,8 @@ with_payments_internal as
     from ranked_transfers_internal a
     left join Payments_internal b
     on a.fbbid = b.fbbid 
-    and (b.payment_event_time > a.transfer_date and b.payment_event_time<= a.next_transfer_date)
+    and (b.payment_event_time >= a.transfer_date and b.payment_event_time<= a.next_transfer_date)
+    qualify row_number() over(partition by a.fbbid, b.payment_event_time order by b.payment_event_time) = 1
 )
 ,
 final_data_internal as
@@ -1398,7 +1431,6 @@ final_data_internal as
     Case 
     when placement_status = 'Internal' then Payment_amount 
     when placement_status = 'External' then payment_amount
-    when placement_status = 'External_pro_tr' then Payment_amount
     else 0 end as payment_amount
     from with_payments_internal
 )
@@ -1855,22 +1887,84 @@ ORDER BY week_end_date;
 
 ----------------------------------------------- Post-CO Settlements ----------------------------------------------------
 
+-- ============================================================
+-- PATCH: mk_postco_settlements_weekly
+-- Fix 1: week bucketing — anchor on DATE_OF_SETTLEMENT_ARRANGEMENT
+--         FROM_DATE (same fix as pre-CO above).
+--         Affected: 396608, 1213006, 1803980 (week shifts of 1–4 weeks)
+-- Fix 2: missing accounts with no FINAL_SETTLEMENT_AMOUNT row.
+--         1203449, 1394229 — have arrangement + ACTIVE status but
+--         CFS never wrote an amount row, so settlement_amount IS NOT NULL
+--         filter excluded them. Now included with NULL amount.
+-- Fix 3: no-arrangement account 1615424 — added via no_arrangement
+--         fallback CTE (same pattern as canonical CFS query).
+-- Scope: Post-CO only (04. CHOF bucket)
+-- ============================================================
+
 CREATE OR REPLACE TABLE analytics.credit.mk_postco_settlements_weekly AS
-WITH all_offers AS (
-    SELECT 
+
+WITH arrangement_anchor AS (
+    SELECT
+        FBBID,
+        FROM_DATE AS settlement_created_date,
+        LEAD(FROM_DATE) OVER (PARTITION BY FBBID ORDER BY FROM_DATE) AS next_settlement_date
+    FROM bi.finance.customer_finance_statuses
+    WHERE STATUS_GROUP = 'DISCOUNTED_SETTLEMENT'
+      AND STATUS_NAME  = 'DATE_OF_SETTLEMENT_ARRANGEMENT'
+),
+
+-- ✅ FIX 3: no-arrangement fallback — accounts with SETTLEMENT_STATUS
+-- but no DATE_OF_SETTLEMENT_ARRANGEMENT row (e.g. 1615424)
+no_arrangement_anchor AS (
+    SELECT
+        FBBID,
+        MIN(FROM_DATE) AS settlement_created_date,
+        NULL::DATE     AS next_settlement_date
+    FROM bi.finance.customer_finance_statuses
+    WHERE STATUS_GROUP = 'DISCOUNTED_SETTLEMENT'
+      AND STATUS_NAME  = 'SETTLEMENT_STATUS'
+      AND FBBID NOT IN (
+          SELECT DISTINCT FBBID FROM bi.finance.customer_finance_statuses
+          WHERE STATUS_GROUP = 'DISCOUNTED_SETTLEMENT'
+            AND STATUS_NAME  = 'DATE_OF_SETTLEMENT_ARRANGEMENT'
+      )
+    GROUP BY FBBID
+),
+
+all_anchors AS (
+    SELECT * FROM arrangement_anchor
+    UNION ALL
+    SELECT * FROM no_arrangement_anchor
+),
+
+all_offers AS (
+    SELECT
         cfs2.fbbid,
-        DATE_TRUNC('WEEK', cfs2.edate::DATE + 4)::DATE + 2 AS week_end_date,
-        DATEADD(DAY, -6, DATE_TRUNC('WEEK', cfs2.edate::DATE + 4)::DATE + 2) AS week_start_date,
+        -- ✅ FIX 1: use true settlement_created_date for week bucketing
+        COALESCE(aa.settlement_created_date, cfs2.edate)             AS settlement_created_date,
+        DATE_TRUNC('WEEK',
+            COALESCE(aa.settlement_created_date, cfs2.edate)::DATE + 4
+        )::DATE + 2                                                  AS week_end_date,
+        DATEADD(DAY, -6,
+            DATE_TRUNC('WEEK',
+                COALESCE(aa.settlement_created_date, cfs2.edate)::DATE + 4
+            )::DATE + 2
+        )                                                            AS week_start_date,
         cfs2.edate,
         cfs2.status_name,
-        CASE WHEN cfs2.status_name = 'SETTLEMENT_STATUS' 
+        CASE WHEN cfs2.status_name = 'SETTLEMENT_STATUS'
                   AND cfs2.status_value = 'FUNDED' THEN cfs2.status_value END AS settlement_status_funded,
-        CASE WHEN cfs2.status_name = 'FINAL_SETTLEMENT_AMOUNT' 
+        CASE WHEN cfs2.status_name = 'FINAL_SETTLEMENT_AMOUNT'
                   THEN cfs2.status_value::NUMERIC * COALESCE(fcu_pco.fx_rate, 1.0) END AS settlement_amount
     FROM bi.finance.customer_finance_statuses cfs2
     LEFT JOIN INDUS.PUBLIC.FX_CUSTOMER_UNIFIED fcu_pco
         ON fcu_pco.FBBID = cfs2.FBBID
         AND fcu_pco.EXCHANGE_DATE = cfs2.EDATE::DATE
+    -- ✅ FIX 1+3: join all_anchors (includes no-arrangement accounts)
+    LEFT JOIN all_anchors aa
+        ON aa.FBBID = cfs2.FBBID
+        AND cfs2.edate >= aa.settlement_created_date
+        AND cfs2.edate  < COALESCE(aa.next_settlement_date, '9999-01-01')
     WHERE cfs2.status_group = 'DISCOUNTED_SETTLEMENT'
       AND (cfs2.status_name = 'FINAL_SETTLEMENT_AMOUNT' OR cfs2.status_name = 'SETTLEMENT_STATUS')
 ),
@@ -1901,7 +1995,7 @@ offers_agg AS (
         a1.settlement_amount,
         a2.dpd_days,
         a2.is_chargeoff,
-        CASE 
+        CASE
             WHEN dpd_days IS NULL AND is_chargeoff = 0 THEN 0
             WHEN dpd_days IS NULL AND is_chargeoff = 1 THEN 98
             ELSE dpd_days
@@ -1913,47 +2007,47 @@ offers_agg AS (
             WHEN dpd_days_corrected BETWEEN 57 AND 91 AND is_chargeoff = 0 THEN '03. Bucket 9-13'
             WHEN dpd_days_corrected <= 98 AND is_chargeoff = 1 THEN '04. CHOF'
         END AS dpd_bucket_group,
-        CASE 
+        CASE
             WHEN fs.fbbid IS NOT NULL AND a1.edate = fs.final_amount_edate THEN 1
             ELSE 0
         END AS is_completed
     FROM all_offers a1
-    LEFT JOIN bi.public.daily_approved_customers_data a2 
+    LEFT JOIN bi.public.daily_approved_customers_data a2
            ON a1.fbbid = a2.fbbid AND a1.edate = a2.edate - 1
-    LEFT JOIN funded_settlements fs 
+    LEFT JOIN funded_settlements fs
            ON a1.fbbid = fs.fbbid AND a1.edate = fs.final_amount_edate
-    WHERE a1.settlement_amount IS NOT NULL
+    -- ✅ FIX 2: removed WHERE settlement_amount IS NOT NULL
+    -- accounts with no amount row (1203449, 1394229) are now included
+    -- with NULL settlement_amount — they count toward num_ but not amt_
 ),
 
 placement_status AS (
-    SELECT 
+    SELECT
         fbbid,
         edate,
-        CASE 
-            WHEN RECOVERY_SUGGESTED_STATE IN ('ILR', 'LR', 'ER', 'FB_TL', 'CB_DLQ', 'HEAL', 'TR_ILR', 'EOL', 'PRELIT', 'LPD', 'MCA_HE') 
-                 OR RECOVERY_SUGGESTED_STATE IS NULL THEN 'Internal'
-            WHEN RECOVERY_SUGGESTED_STATE IN ('ELR', 'PROLIT', 'TR_LR') THEN 'External'
-            ELSE 'Unknown'
+        CASE
+            WHEN recovery_suggested_substate IN ('3RD_P_SOLD', 'ASPIRE_LAW', 'BK_BL', 'EVANS_MUL', 'LP_HARVEST', 'LP_WELTMAN', 'MRS_PRIM', 'MRS_SEC', 'PB_CAP_PR', 'PB_CAPITAL', 'SEQ_PRIM', 'SEQ_SEC') THEN 'External'
+            ELSE 'Internal'
         END AS postco_placement
     FROM bi.public.daily_approved_customers_data
 )
 
-SELECT 
+SELECT
     week_start_date,
     week_end_date,
 
     -- Offered settlements
-    COUNT(DISTINCT CASE WHEN dpd_bucket_group = '04. CHOF' THEN a1.fbbid END) AS postco_num_settlements,
-    COALESCE(SUM(CASE WHEN dpd_bucket_group = '04. CHOF' THEN settlement_amount END), 0) AS postco_amt_settlements,
-    
+    COUNT(DISTINCT CASE WHEN dpd_bucket_group = '04. CHOF' THEN a1.fbbid END)                            AS postco_num_settlements,
+    COALESCE(SUM(CASE WHEN dpd_bucket_group = '04. CHOF' THEN settlement_amount END), 0)                  AS postco_amt_settlements,
+
     COUNT(DISTINCT CASE WHEN dpd_bucket_group = '04. CHOF' AND postco_placement = 'Internal' THEN a1.fbbid END) AS internal_postco_num_settlements,
     COUNT(DISTINCT CASE WHEN dpd_bucket_group = '04. CHOF' AND postco_placement = 'External' THEN a1.fbbid END) AS external_postco_num_settlements,
-    
+
     COALESCE(SUM(CASE WHEN dpd_bucket_group = '04. CHOF' AND postco_placement = 'Internal' THEN settlement_amount END), 0) AS internal_postco_amt_settlements,
     COALESCE(SUM(CASE WHEN dpd_bucket_group = '04. CHOF' AND postco_placement = 'External' THEN settlement_amount END), 0) AS external_postco_amt_settlements,
 
     -- Completed settlements
-    COUNT(DISTINCT CASE WHEN dpd_bucket_group = '04. CHOF' AND is_completed = 1 THEN a1.fbbid END) AS postco_num_completed_settlements,
+    COUNT(DISTINCT CASE WHEN dpd_bucket_group = '04. CHOF' AND is_completed = 1 THEN a1.fbbid END)        AS postco_num_completed_settlements,
     COALESCE(SUM(CASE WHEN dpd_bucket_group = '04. CHOF' AND is_completed = 1 THEN settlement_amount END), 0) AS postco_amt_completed_settlements,
 
     COUNT(DISTINCT CASE WHEN dpd_bucket_group = '04. CHOF' AND is_completed = 1 AND postco_placement = 'Internal' THEN a1.fbbid END) AS internal_postco_num_completed_settlements,
@@ -1963,7 +2057,7 @@ SELECT
     COALESCE(SUM(CASE WHEN dpd_bucket_group = '04. CHOF' AND is_completed = 1 AND postco_placement = 'External' THEN settlement_amount END), 0) AS external_postco_amt_completed_settlements
 
 FROM offers_agg a1
-LEFT JOIN placement_status a2 ON a1.fbbid = a2.fbbid AND a1.edate = a2.edate 
+LEFT JOIN placement_status a2 ON a1.fbbid = a2.fbbid AND a1.edate = a2.edate
 GROUP BY 1, 2
 ORDER BY 1, 2;
 

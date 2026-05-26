@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MUW Risk Factors — Team Lead Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f1419;
+      --panel: #1a2332;
+      --border: #2d3a4f;
+      --text: #e8edf4;
+      --muted: #8b9cb3;
+      --accent: #3b82f6;
+      --low: #22c55e;
+      --med: #eab308;
+      --high: #ef4444;
+      --team: #94a3b8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+    }
+    header {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      background: var(--panel);
+    }
+    header h1 { margin: 0 0 0.25rem; font-size: 1.35rem; font-weight: 600; }
+    header p { margin: 0; color: var(--muted); font-size: 0.85rem; }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1rem;
+      align-items: flex-end;
+      padding: 1rem 1.5rem;
+      background: #151c28;
+      border-bottom: 1px solid var(--border);
+    }
+    .field label {
+      display: block;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--muted);
+      margin-bottom: 0.25rem;
+    }
+    select, input[type="file"], button {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.45rem 0.65rem;
+      border-radius: 6px;
+      font-size: 0.85rem;
+    }
+    button {
+      cursor: pointer;
+      background: var(--accent);
+      border-color: var(--accent);
+      font-weight: 600;
+    }
+    button:hover { filter: brightness(1.1); }
+    .pill {
+      display: inline-block;
+      padding: 0.35rem 0.75rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      font-size: 0.8rem;
+    }
+    main { padding: 1rem 1.5rem 2rem; max-width: 1400px; margin: 0 auto; }
+    section {
+      margin-bottom: 2rem;
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    section > .sec-head {
+      padding: 0.85rem 1.1rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+    section h2 { margin: 0; font-size: 1rem; font-weight: 600; }
+    .sec-head .controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+    .toggle-group {
+      display: flex;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .toggle-group button {
+      border: none;
+      border-radius: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 0.35rem 0.65rem;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+    .toggle-group button.active {
+      background: var(--accent);
+      color: #fff;
+    }
+    .sec-body { padding: 1rem 1.1rem; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; }
+    @media (max-width: 1000px) {
+      .grid-3, .grid-2 { grid-template-columns: 1fr; }
+    }
+    .chart-box {
+      background: #121820;
+      border-radius: 8px;
+      padding: 0.75rem;
+      min-height: 280px;
+    }
+    .chart-box h3 {
+      margin: 0 0 0.5rem;
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--muted);
+    }
+    .chart-wrap { position: relative; height: 240px; }
+    .sm-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0.75rem;
+    }
+    @media (max-width: 900px) { .sm-grid { grid-template-columns: 1fr 1fr; } }
+    .sm-chart { height: 160px; }
+    .matrix-wrap { overflow-x: auto; }
+    table.matrix {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.75rem;
+    }
+    table.matrix th, table.matrix td {
+      border: 1px solid var(--border);
+      padding: 0.4rem 0.5rem;
+      text-align: center;
+    }
+    table.matrix th { background: #121820; color: var(--muted); }
+    .empty {
+      color: var(--muted);
+      text-align: center;
+      padding: 2rem;
+      font-size: 0.9rem;
+    }
+    .note {
+      font-size: 0.75rem;
+      color: var(--muted);
+      margin-top: 0.5rem;
+    }
+    label.chk { font-size: 0.8rem; display: flex; align-items: center; gap: 0.35rem; color: var(--muted); }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>MUW Risk Factors — Team Lead Dashboard</h1>
+    <p>Load export from <code>ANALYTICS.CREDIT.MUW_RISK_FACTORS_DASHBOARD</code> (CSV). Modules A–D per Risk Factors spec.</p>
+  </header>
+
+  <div class="toolbar">
+    <div class="field">
+      <label>Data file (CSV)</label>
+      <input type="file" id="csv-file" accept=".csv" />
+    </div>
+    <div class="field">
+      <label>Team Lead</label>
+      <select id="flt-tl"><option value="">All TLs</option></select>
+    </div>
+    <div class="field">
+      <label>UW Type</label>
+      <select id="flt-uw-type">
+        <option value="">All</option>
+        <option>Onboarding</option>
+        <option>Ongoing</option>
+        <option>HVC</option>
+        <option>AUW Monitoring</option>
+        <option>Pre-Approval</option>
+      </select>
+    </div>
+    <div class="field">
+      <label>Program</label>
+      <select id="flt-program"><option value="">All programs</option></select>
+    </div>
+    <div class="field">
+      <label>Partner</label>
+      <select id="flt-partner"><option value="">All partners</option></select>
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <span class="pill" id="files-scope">Files in scope: —</span>
+    </div>
+  </div>
+
+  <main id="app" style="display:none">
+    <!-- MODULE A -->
+    <section id="mod-a">
+      <div class="sec-head">
+        <h2>Module A — Portfolio composition</h2>
+        <div class="controls">
+          <div class="toggle-group" data-period="a">
+            <button data-p="IN_12MO" class="active">12mo</button>
+            <button data-p="IN_6MO">6mo</button>
+            <button data-p="IN_3MO">3mo</button>
+            <button data-p="IN_T4W">4W</button>
+          </div>
+        </div>
+      </div>
+      <div class="sec-body grid-3" id="mod-a-charts"></div>
+      <p class="note sec-body" style="padding-top:0">Snapshot: latest review per customer (<code>RNK_LATEST=1</code>) within filters. T4W uses Wed-week buckets.</p>
+    </section>
+
+    <!-- MODULE B -->
+    <section id="mod-b">
+      <div class="sec-head">
+        <h2>Module B — Team calibration</h2>
+        <div class="controls">
+          <div class="toggle-group" data-period="b">
+            <button data-p="IN_12MO" class="active">12mo</button>
+            <button data-p="IN_6MO">6mo</button>
+            <button data-p="IN_3MO">3mo</button>
+            <button data-p="IN_T4W">4W</button>
+          </div>
+          <label class="chk"><input type="checkbox" id="b-mature" checked /> Mature cohort only (6mo+ age, reduces DQ censoring)</label>
+          <label class="chk"><input type="checkbox" id="b-complete" checked /> Complete approvals only</label>
+          <label class="chk"><input type="checkbox" id="b-ftd" /> FTD denominator only</label>
+        </div>
+      </div>
+      <div class="sec-body">
+        <h3 style="font-size:0.85rem;margin:0 0 0.75rem;color:var(--muted)">B.1 — Avg risk-factor rating (1–3)</h3>
+        <div class="chart-box"><div class="chart-wrap"><canvas id="chart-b1"></canvas></div></div>
+        <h3 style="font-size:0.85rem;margin:1.25rem 0 0.75rem;color:var(--muted)">B.2 — DQ% by rating (Low / Med / High)</h3>
+        <div class="sm-grid" id="chart-b2-grid"></div>
+        <h3 style="font-size:0.85rem;margin:1.25rem 0 0.75rem;color:var(--muted)">B.3 — Calibration health (High DQ% − Low DQ%, pp)</h3>
+        <div class="chart-box"><div class="chart-wrap"><canvas id="chart-b3"></canvas></div></div>
+      </div>
+    </section>
+
+    <!-- MODULE C -->
+    <section id="mod-c">
+      <div class="sec-head">
+        <h2>Module C — Individual underwriter</h2>
+        <div class="controls">
+          <select id="c-uw-select"></select>
+          <div class="toggle-group" data-period="c">
+            <button data-p="IN_12MO" class="active">12mo</button>
+            <button data-p="IN_6MO">6mo</button>
+            <button data-p="IN_3MO">3mo</button>
+            <button data-p="IN_T4W">4W</button>
+          </div>
+        </div>
+      </div>
+      <div class="sec-body">
+        <div class="chart-box"><div class="chart-wrap"><canvas id="chart-c1"></canvas></div></div>
+        <div class="sm-grid" id="chart-c2-grid" style="margin-top:1rem"></div>
+        <div class="chart-box" style="margin-top:1rem"><div class="chart-wrap"><canvas id="chart-c3"></canvas></div></div>
+      </div>
+    </section>
+
+    <!-- MODULE D -->
+    <section id="mod-d">
+      <div class="sec-head">
+        <h2>Module D — Second Look override matrix</h2>
+        <div class="controls">
+          <div class="toggle-group" data-period="d">
+            <button data-p="IN_12MO" class="active">12mo</button>
+            <button data-p="IN_6MO">6mo</button>
+            <button data-p="IN_3MO">3mo</button>
+            <button data-p="IN_T4W">4W</button>
+          </div>
+          <label class="chk"><input type="checkbox" id="d-muw-only" /> MUW-decided only</label>
+        </div>
+      </div>
+      <div class="sec-body matrix-wrap" id="matrix-d"></div>
+    </section>
+  </main>
+
+  <main id="placeholder">
+    <p class="empty">Upload <strong>Untitled 15_2026-05-23-0008.csv</strong> (or any MUW_RISK_FACTORS_DASHBOARD export) to render the dashboard.</p>
+  </main>
+
+<script>
+(() => {
+  const RF = [
+    { key: 'rf_bank_balance', num: 'rf_bank_balance_num', label: 'Bank Balance' },
+    { key: 'rf_quality_of_revenue', num: 'rf_quality_of_revenue_num', label: 'Quality of Revenue' },
+    { key: 'rf_personal_credit', num: 'rf_personal_credit_num', label: 'Personal Credit' },
+    { key: 'rf_industry', num: 'rf_industry_num', label: 'Industry' },
+    { key: 'rf_debt_service', num: 'rf_debt_service_num', label: 'Debt Service' },
+    { key: 'rf_residual', num: 'rf_residual_num', label: 'Residual' },
+  ];
+  const GRADES = ['A','B','C','D','E','F','G'];
+  const VANTAGE_ORDER = ['800-850','750-800','700-750','650-700','600-650','<600'];
+  const OG_ORDER = ['OG 1-4','OG 5-7','OG 8-10','OG 11-12','OG 13+','No Bucket'];
+  const REV_ORDER = ['>$1.5M','$500K-$1.5M','$0-$500K'];
+  const RATINGS = ['Low','Medium','High'];
+  const PERIOD_FLAG = { IN_T4W: 'is_in_t4w', IN_3MO: 'is_in_3mo', IN_6MO: 'is_in_6mo', IN_12MO: 'is_in_12mo' };
+
+  let rawRows = [];
+  let charts = {};
+
+  function normKey(h) { return h.trim().toLowerCase(); }
+
+  function parseCSV(text) {
+    const lines = text.split(/\r?\n/).filter(l => l.trim());
+    if (!lines.length) return [];
+    const headers = splitCSVLine(lines[0]).map(normKey);
+    return lines.slice(1).map(line => {
+      const vals = splitCSVLine(line);
+      const o = {};
+      headers.forEach((h, i) => { o[h] = (vals[i] ?? '').trim(); });
+      return o;
+    });
+  }
+
+  function splitCSVLine(line) {
+    const out = [];
+    let cur = '', inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { inQ = !inQ; continue; }
+      if (c === ',' && !inQ) { out.push(cur); cur = ''; continue; }
+      cur += c;
+    }
+    out.push(cur);
+    return out;
+  }
+
+  function flag(v) { return v === '1' || v === 1 || v === true; }
+
+  function getFiltered() {
+    const tl = document.getElementById('flt-tl').value;
+    const uwType = document.getElementById('flt-uw-type').value;
+    const prog = document.getElementById('flt-program').value;
+    const partner = document.getElementById('flt-partner').value;
+    return rawRows.filter(r => {
+      if (tl && r.tl_name !== tl) return false;
+      if (uwType && r.uw_type !== uwType) return false;
+      if (prog && r.program_name !== prog) return false;
+      if (partner && r.partner !== partner) return false;
+      return true;
+    });
+  }
+
+  function inPeriod(r, periodKey) {
+    const col = PERIOD_FLAG[periodKey];
+    return col ? flag(r[col]) : true;
+  }
+
+  function scopeRows(periodKey, opts = {}) {
+    let rows = getFiltered().filter(r => inPeriod(r, periodKey));
+    if (opts.complete) rows = rows.filter(r => flag(r.is_complete));
+    if (opts.mature) rows = rows.filter(r => flag(r.is_mature_6mo));
+    if (opts.ftd) rows = rows.filter(r => flag(r.is_ftd));
+    if (opts.secondLook) rows = rows.filter(r => r.program_name === 'Second Look' || flag(r.is_second_look));
+    if (opts.muwDecided) rows = rows.filter(r => flag(r.is_muw_decided_sl));
+    return rows;
+  }
+
+  function latestPerFbbid(rows) {
+    const m = new Map();
+    rows.forEach(r => {
+      if (!flag(r.rnk_latest)) return;
+      const id = r.fbbid;
+      if (!m.has(id)) m.set(id, r);
+    });
+    return [...m.values()];
+  }
+
+  function periodLabels(rows, periodKey) {
+    if (periodKey === 'IN_T4W') {
+      const weeks = [...new Set(rows.map(r => r.review_week_label || r.review_week_start).filter(Boolean))].sort();
+      return weeks;
+    }
+    const months = [...new Set(rows.map(r => (r.review_month || r.review_complete_date || '').slice(0, 7)).filter(Boolean))].sort();
+    return months;
+  }
+
+  function pct(part, whole) { return whole ? Math.round(1000 * part / whole) / 10 : 0; }
+
+  function destroyChart(id) {
+    if (charts[id]) { charts[id].destroy(); delete charts[id]; }
+  }
+
+  function stackedDist(rows, dimKey, order) {
+    const periods = periodLabels(rows, state.periodA);
+    const datasets = order.map((bucket, bi) => ({
+      label: bucket,
+      data: periods.map(() => 0),
+      backgroundColor: palette(order.length)[bi],
+      stack: 's',
+    }));
+    const totals = periods.map(() => 0);
+    periods.forEach((p, pi) => {
+      const sub = rows.filter(r => {
+        if (state.periodA === 'IN_T4W')
+          return (r.review_week_label || r.review_week_start) === p;
+        return (r.review_month || r.review_complete_date || '').slice(0, 7) === p;
+      });
+      const n = sub.length || 1;
+      order.forEach((bucket, bi) => {
+        const c = sub.filter(r => normalizeBucket(r[dimKey], dimKey) === bucket).length;
+        datasets[bi].data[pi] = pct(c, sub.length);
+        totals[pi] += c;
+      });
+    });
+    return { labels: periods, datasets };
+  }
+
+  function normalizeBucket(v, dim) {
+    if (!v) return dim === 'og_bucket_group_banded' ? 'No Bucket' : 'Unknown';
+    const s = String(v).trim();
+    if (dim === 'og_bucket_group_banded') {
+      if (/1-4/.test(s)) return 'OG 1-4';
+      if (/5-7/.test(s)) return 'OG 5-7';
+      if (/8-10/.test(s)) return 'OG 8-10';
+      if (/11-12/.test(s)) return 'OG 11-12';
+      if (/13/.test(s)) return 'OG 13+';
+      if (/no bucket/i.test(s)) return 'No Bucket';
+    }
+    if (dim === 'revenue_band') {
+      if (s.includes('1.5')) return '>$1.5M';
+      if (s.includes('500')) return '$500K-$1.5M';
+      return '$0-$500K';
+    }
+    return s;
+  }
+
+  function palette(n) {
+    const base = ['#22c55e','#84cc16','#eab308','#f97316','#ef4444','#64748b'];
+    return base.slice(0, n);
+  }
+
+  const state = { periodA: 'IN_12MO', periodB: 'IN_12MO', periodC: 'IN_12MO', periodD: 'IN_12MO' };
+
+  function buildModuleA() {
+    const el = document.getElementById('mod-a-charts');
+    el.innerHTML = '';
+    const rows = scopeRows(state.periodA, { complete: true });
+    const dims = [
+      { key: 'vantage_bucket', title: 'Vantage score', order: VANTAGE_ORDER },
+      { key: 'og_bucket_group_banded', title: 'Onboarding grade (OG)', order: OG_ORDER },
+      { key: 'revenue_band', title: 'Revenue band', order: REV_ORDER },
+    ];
+    dims.forEach((d, i) => {
+      const box = document.createElement('div');
+      box.className = 'chart-box';
+      box.innerHTML = `<h3>${d.title}</h3><div class="chart-wrap"><canvas id="chart-a-${i}"></canvas></div>`;
+      el.appendChild(box);
+      const data = stackedDist(rows, d.key, d.order);
+      destroyChart(`a-${i}`);
+      charts[`a-${i}`] = new Chart(document.getElementById(`chart-a-${i}`), {
+        type: 'bar',
+        data,
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: 'bottom', labels: { color: '#8b9cb3', boxWidth: 12 } } },
+          scales: {
+            x: { stacked: true, ticks: { color: '#8b9cb3', maxRotation: 45 } },
+            y: { stacked: true, max: 100, ticks: { color: '#8b9cb3', callback: v => v + '%' } },
+          },
+        },
+      });
+    });
+  }
+
+  function timeBuckets(rows, periodKey) {
+    if (periodKey === 'IN_T4W') {
+      return [...new Set(rows.map(r => r.review_week_label || r.review_week_start).filter(Boolean))].sort();
+    }
+    return [...new Set(rows.map(r => (r.review_month || '').slice(0, 7) || (r.review_complete_date || '').slice(0, 7)).filter(Boolean))].sort();
+  }
+
+  function filterTime(rows, periodKey, label) {
+    if (periodKey === 'IN_T4W')
+      return rows.filter(r => (r.review_week_label || r.review_week_start) === label);
+    return rows.filter(r => ((r.review_month || r.review_complete_date || '').slice(0, 7)) === label);
+  }
+
+  function buildModuleB1() {
+    const mature = document.getElementById('b-mature').checked;
+    const complete = document.getElementById('b-complete').checked;
+    const ftd = document.getElementById('b-ftd').checked;
+    const rows = scopeRows(state.periodB, { mature, complete, ftd });
+    const labels = timeBuckets(rows, state.periodB);
+    const datasets = RF.map((rf, i) => ({
+      label: rf.label,
+      data: labels.map(lab => {
+        const sub = filterTime(rows, state.periodB, lab);
+        const nums = sub.map(r => parseFloat(r[rf.num])).filter(x => !isNaN(x));
+        return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+      }),
+      borderColor: palette(6)[i],
+      backgroundColor: palette(6)[i] + '33',
+      tension: 0.25,
+      spanGaps: true,
+    }));
+    destroyChart('b1');
+    charts.b1 = new Chart(document.getElementById('chart-b1'), {
+      type: 'line',
+      data: { labels, datasets },
+      options: chartLineOpts('Avg rating (1=Low, 3=High)'),
+    });
+  }
+
+  function dqPct(sub, rfKey, rating) {
+    const bucket = sub.filter(r => r[rfKey] === rating);
+    if (!bucket.length) return null;
+    const dq = bucket.filter(r => flag(r.udr35)).length;
+    return pct(dq, bucket.length);
+  }
+
+  function buildModuleB2() {
+    const grid = document.getElementById('chart-b2-grid');
+    grid.innerHTML = '';
+    const mature = document.getElementById('b-mature').checked;
+    const complete = document.getElementById('b-complete').checked;
+    const ftd = document.getElementById('b-ftd').checked;
+    const rows = scopeRows(state.periodB, { mature, complete, ftd });
+    const labels = timeBuckets(rows, state.periodB);
+    RF.forEach((rf, i) => {
+      const box = document.createElement('div');
+      box.className = 'chart-box';
+      box.innerHTML = `<h3>${rf.label}</h3><div class="sm-chart"><canvas id="chart-b2-${i}"></canvas></div>`;
+      grid.appendChild(box);
+      const datasets = RATINGS.map((rat, ri) => ({
+        label: rat,
+        data: labels.map(lab => dqPct(filterTime(rows, state.periodB, lab), rf.key, rat)),
+        borderColor: [ '#22c55e', '#eab308', '#ef4444' ][ri],
+        tension: 0.25,
+        spanGaps: true,
+      }));
+      destroyChart(`b2-${i}`);
+      charts[`b2-${i}`] = new Chart(document.getElementById(`chart-b2-${i}`), {
+        type: 'line',
+        data: { labels, datasets },
+        options: chartLineOpts('DQ %'),
+      });
+    });
+  }
+
+  function buildModuleB3() {
+    const mature = document.getElementById('b-mature').checked;
+    const complete = document.getElementById('b-complete').checked;
+    const ftd = document.getElementById('b-ftd').checked;
+    const rows = scopeRows(state.periodB, { mature, complete, ftd });
+    const labels = timeBuckets(rows, state.periodB);
+    const datasets = RF.map((rf, i) => ({
+      label: rf.label,
+      data: labels.map(lab => {
+        const sub = filterTime(rows, state.periodB, lab);
+        const hi = dqPct(sub, rf.key, 'High');
+        const lo = dqPct(sub, rf.key, 'Low');
+        if (hi == null || lo == null) return null;
+        return Math.round((hi - lo) * 10) / 10;
+      }),
+      borderColor: palette(6)[i],
+      tension: 0.25,
+      spanGaps: true,
+    }));
+    destroyChart('b3');
+    charts.b3 = new Chart(document.getElementById('chart-b3'), {
+      type: 'line',
+      data: { labels, datasets },
+      options: {
+        ...chartLineOpts('Spread (pp)'),
+        plugins: {
+          ...chartLineOpts('').plugins,
+          annotation: {},
+        },
+        scales: {
+          ...chartLineOpts('').scales,
+          y: { ...chartLineOpts('').scales.y, grid: { color: '#2d3a4f' } },
+        },
+      },
+    });
+  }
+
+  function chartLineOpts(yLabel) {
+    return {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#8b9cb3', boxWidth: 12 } },
+      },
+      scales: {
+        x: { ticks: { color: '#8b9cb3', maxRotation: 45 } },
+        y: { ticks: { color: '#8b9cb3' }, title: { display: !!yLabel, text: yLabel, color: '#8b9cb3' } },
+      },
+    };
+  }
+
+  function buildModuleC() {
+    const uw = document.getElementById('c-uw-select').value;
+    if (!uw) return;
+    const mature = document.getElementById('b-mature').checked;
+    const complete = document.getElementById('b-complete').checked;
+    const team = scopeRows(state.periodC, { mature, complete });
+    const uwRows = team.filter(r => r.uw_name === uw);
+    const labels = timeBuckets(team, state.periodC);
+
+    // C.1
+    const dsUw = RF.map((rf, i) => lineSeries(uwRows, rf, labels, state.periodC, palette(6)[i], false));
+    const dsTeam = RF.map((rf, i) => lineSeries(team, rf, labels, state.periodC, palette(6)[i], true));
+    destroyChart('c1');
+    charts.c1 = new Chart(document.getElementById('chart-c1'), {
+      type: 'line',
+      data: { labels, datasets: [...dsUw, ...dsTeam.map(d => ({ ...d, label: d.label + ' (team)', borderDash: [6, 4], borderWidth: 1.5 }))] },
+      options: chartLineOpts('Avg rating'),
+    });
+
+    // C.2 small multiples
+    const grid = document.getElementById('chart-c2-grid');
+    grid.innerHTML = '';
+    RF.forEach((rf, i) => {
+      const box = document.createElement('div');
+      box.className = 'chart-box';
+      box.innerHTML = `<h3>${rf.label}</h3><div class="sm-chart"><canvas id="chart-c2-${i}"></canvas></div>`;
+      grid.appendChild(box);
+      const datasets = [];
+      RATINGS.forEach((rat, ri) => {
+        datasets.push({
+          label: `${uw} ${rat}`,
+          data: labels.map(lab => dqPct(filterTime(uwRows, state.periodC, lab), rf.key, rat)),
+          borderColor: ['#22c55e','#eab308','#ef4444'][ri],
+          tension: 0.25,
+        });
+        datasets.push({
+          label: `Team ${rat}`,
+          data: labels.map(lab => dqPct(filterTime(team, state.periodC, lab), rf.key, rat)),
+          borderColor: ['#22c55e88','#eab30888','#ef444488'][ri],
+          borderDash: [4, 4],
+          tension: 0.25,
+        });
+      });
+      destroyChart(`c2-${i}`);
+      charts[`c2-${i}`] = new Chart(document.getElementById(`chart-c2-${i}`), {
+        type: 'line',
+        data: { labels, datasets },
+        options: chartLineOpts('DQ %'),
+      });
+    });
+
+    // C.3 heal comparison
+    const healUw = RF.map(rf => healOne(uwRows, rf, labels, state.periodC));
+    const healTeam = RF.map(rf => healOne(team, rf, labels, state.periodC));
+    destroyChart('c3');
+    charts.c3 = new Chart(document.getElementById('chart-c3'), {
+      type: 'bar',
+      data: {
+        labels: RF.map(r => r.label),
+        datasets: [
+          { label: uw, data: healUw, backgroundColor: '#3b82f6' },
+          { label: 'Team avg', data: healTeam, backgroundColor: '#64748b' },
+        ],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: { legend: { labels: { color: '#8b9cb3' } } },
+        scales: {
+          x: { ticks: { color: '#8b9cb3', maxRotation: 35 } },
+          y: { ticks: { color: '#8b9cb3' }, title: { display: true, text: 'Heal (pp)', color: '#8b9cb3' } },
+        },
+      },
+    });
+  }
+
+  function lineSeries(rows, rf, labels, periodKey, color, dashed) {
+    return {
+      label: rf.label,
+      data: labels.map(lab => {
+        const sub = filterTime(rows, periodKey, lab);
+        const nums = sub.map(r => parseFloat(r[rf.num])).filter(x => !isNaN(x));
+        return nums.length ? nums.reduce((a, b) => a + b, 0) / nums.length : null;
+      }),
+      borderColor: color,
+      borderDash: dashed ? [5, 5] : [],
+      tension: 0.25,
+      spanGaps: true,
+    };
+  }
+
+  function healOne(rows, rf, labels, periodKey) {
+    const sub = rows;
+    const hi = dqPct(sub, rf.key, 'High');
+    const lo = dqPct(sub, rf.key, 'Low');
+    if (hi == null || lo == null) return null;
+    return Math.round((hi - lo) * 10) / 10;
+  }
+
+  function buildModuleD() {
+    const muwOnly = document.getElementById('d-muw-only').checked;
+    let rows = scopeRows(state.periodD, { secondLook: true });
+    if (muwOnly) rows = rows.filter(r => flag(r.is_muw_decided_sl));
+    rows = rows.filter(r => r.automated_risk_grade && r.uw_risk_grade);
+    const autoGrades = [...new Set(rows.map(r => r.automated_risk_grade))].filter(g => GRADES.includes(g)).sort();
+    const uwGrades = GRADES;
+    const matrix = {};
+    autoGrades.forEach(a => { matrix[a] = {}; uwGrades.forEach(u => { matrix[a][u] = 0; }); });
+    rows.forEach(r => {
+      if (matrix[r.automated_risk_grade] && matrix[r.automated_risk_grade][r.uw_risk_grade] != null)
+        matrix[r.automated_risk_grade][r.uw_risk_grade]++;
+    });
+    let html = `<p class="note">${rows.length} Second Look reviews in window</p><table class="matrix"><thead><tr><th>Auto \\ UW</th>`;
+    uwGrades.forEach(g => { html += `<th>${g}</th>`; });
+    html += '</tr></thead><tbody>';
+    autoGrades.forEach(a => {
+      html += `<tr><th>${a}</th>`;
+      uwGrades.forEach(u => {
+        const v = matrix[a][u] || 0;
+        const bg = a === u ? 'rgba(59,130,246,0.25)' : 'transparent';
+        html += `<td style="background:${bg}">${v || '—'}</td>`;
+      });
+      html += '</tr>';
+    });
+    html += '</tbody></table>';
+    document.getElementById('matrix-d').innerHTML = html;
+  }
+
+  function populateFilters() {
+    const tls = [...new Set(rawRows.map(r => r.tl_name).filter(Boolean))].sort();
+    const progs = [...new Set(rawRows.map(r => r.program_name).filter(Boolean))].sort();
+    const partners = [...new Set(rawRows.map(r => r.partner).filter(Boolean))].sort();
+    const uws = [...new Set(rawRows.map(r => r.uw_name).filter(u => u))].sort();
+
+    const tlSel = document.getElementById('flt-tl');
+    tlSel.innerHTML = '<option value="">All TLs</option>' + tls.map(t => `<option>${t}</option>`).join('');
+
+    const progSel = document.getElementById('flt-program');
+    progSel.innerHTML = '<option value="">All programs</option>' + progs.map(p => `<option>${p}</option>`).join('');
+
+    const partSel = document.getElementById('flt-partner');
+    partSel.innerHTML = '<option value="">All partners</option>' + partners.slice(0, 200).map(p => `<option>${esc(p)}</option>`).join('');
+
+    const uwSel = document.getElementById('c-uw-select');
+    uwSel.innerHTML = uws.map(u => `<option>${esc(u)}</option>`).join('');
+  }
+
+  function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+
+  function updateScopePill() {
+    const rows = getFiltered().filter(r => flag(r.is_complete) || (r.status__c || '').toLowerCase().startsWith('complete'));
+    const n = new Set(rows.map(r => r.fbbid)).size;
+    document.getElementById('files-scope').textContent = `Files in scope: ${n.toLocaleString()}`;
+  }
+
+  function applyFilters() {
+    updateScopePill();
+    buildModuleA();
+    buildModuleB1();
+    buildModuleB2();
+    buildModuleB3();
+    buildModuleC();
+    buildModuleD();
+  }
+
+  function bindPeriodToggles(group, key) {
+    document.querySelectorAll(`.toggle-group[data-period="${group}"] button`).forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll(`.toggle-group[data-period="${group}"] button`).forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        state[key] = btn.dataset.p;
+        if (group === 'a') buildModuleA();
+        else if (group === 'b') { buildModuleB1(); buildModuleB2(); buildModuleB3(); }
+        else if (group === 'c') buildModuleC();
+        else if (group === 'd') buildModuleD();
+      });
+    });
+  }
+
+  document.getElementById('csv-file').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => {
+      rawRows = parseCSV(ev.target.result);
+      document.getElementById('placeholder').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+      populateFilters();
+      applyFilters();
+    };
+    reader.readAsText(file);
+  });
+
+  ['flt-tl','flt-uw-type','flt-program','flt-partner'].forEach(id => {
+    document.getElementById(id).addEventListener('change', applyFilters);
+  });
+  ['b-mature','b-complete','b-ftd','d-muw-only'].forEach(id => {
+    document.getElementById(id).addEventListener('change', applyFilters);
+  });
+  document.getElementById('c-uw-select').addEventListener('change', buildModuleC);
+
+  bindPeriodToggles('a', 'periodA');
+  bindPeriodToggles('b', 'periodB');
+  bindPeriodToggles('c', 'periodC');
+  bindPeriodToggles('d', 'periodD');
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,886 @@
+-- ============================================================
+-- MUW QA DASHBOARD — MASTER TABLE  v2
+-- ANALYTICS.CREDIT.MUW_QA_DASHBOARD
+-- Grain: one row per MUW review decision
+-- Covers: Modules A–G
+-- Fixes applied v2:
+--   1. QA scorecard false flags: guard requires vantage_at_review IS NOT NULL
+--   2. Pre-Approval revenue: LEADS_DATA fallback (100% coverage)
+--   3. Bank balance: DAILY_APPROVED fallback for existing-customer programs
+--   4. Negative SLA: GREATEST(0,...) on clock hours
+-- ============================================================
+
+CREATE OR REPLACE TABLE ANALYTICS.CREDIT.MUW_QA_DASHBOARD AS
+
+-- ─────────────────────────────────────────────────────────────
+-- US Holidays 2026 (business-hours SLA calc)
+-- ─────────────────────────────────────────────────────────────
+WITH us_holidays AS (
+    SELECT holiday_date FROM (VALUES
+        ('2026-01-19'::DATE), ('2026-02-16'::DATE), ('2026-05-25'::DATE),
+        ('2026-06-19'::DATE), ('2026-07-03'::DATE), ('2026-09-07'::DATE),
+        ('2026-11-26'::DATE), ('2026-11-27'::DATE), ('2026-12-24'::DATE),
+        ('2026-12-25'::DATE), ('2026-12-31'::DATE)
+    ) t(holiday_date)
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- UNDERWRITER NAME MAP
+-- ─────────────────────────────────────────────────────────────
+uw_map AS (
+    SELECT uw_id, uw_name FROM (VALUES
+        ('0054T00000103TVQAY', 'Monica Rios'),
+        ('0054T0000010699QAA', 'Christopher Dykes'),
+        ('005Rd000003Lu2HIAS', 'Greg Maitles'),
+        ('0054T0000010694QAA', 'Neil Patel'),
+        ('005Rd000005K1LFIA0', 'Dmitry Altshuler'),
+        ('0054T000002Oc2DQAS', 'Kia Fowler'),
+        ('0054T000002NfylQAC', 'Lorena Albright'),
+        ('005Rd000004bZSjIAM', 'Jerry Christian'),
+        ('005Rd000005M10zIAC', 'Nagur Vali Shaik'),
+        ('005Rd000005M12bIAC', 'Karthik Sirigiri'),
+        ('005Rd000005W5cnIAC', 'Sreekanth Anumula'),
+        ('005Rd000005gikvIAA', 'Rhythm Rai'),
+        ('005Rd000005t5LxIAI', 'Salman Khan'),
+        ('005Rd000005t5NZIAY', 'Banadita Rachel'),
+        ('005Rd000005t5QnIAI', 'Srihari Amudala')
+    ) t(uw_id, uw_name)
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 1: Raw MUW reviews — all 6 programs, one row per decision
+-- ─────────────────────────────────────────────────────────────
+raw_reviews AS (
+    SELECT
+        TRY_TO_NUMBER(l.fundbox_id__c)                            AS fbbid,
+        l.id                                                       AS review_id,
+        l.recordtypeid,
+        CASE l.recordtypeid
+            WHEN '012Rd000000AcjxIAC' THEN 'OB AUW'
+            WHEN '0124T000000DSMTQA4' THEN 'Second Look'
+            WHEN '012Rd000000jbbJIAQ' THEN 'Pre-Approval'
+            WHEN '012Rd000001B2txIAC' THEN 'OG AUW'
+            WHEN '012Rd000002EppVIAS' THEN 'HVC'
+            WHEN '012Rd000002Dp5CIAS' THEN 'AUW Monitoring'
+            ELSE 'Other'
+        END                                                        AS program_name,
+        CASE l.recordtypeid
+            WHEN '012Rd000000AcjxIAC' THEN 'Reactive'
+            WHEN '0124T000000DSMTQA4' THEN 'Reactive'
+            WHEN '012Rd000000jbbJIAQ' THEN 'Reactive'
+            WHEN '012Rd000001B2txIAC' THEN 'Proactive'
+            WHEN '012Rd000002EppVIAS' THEN 'Proactive'
+            WHEN '012Rd000002Dp5CIAS' THEN 'Proactive'
+            ELSE 'Other'
+        END                                                        AS program_group,
+        l.status__c,
+        l.risk_level__c,
+        l.underwriting_risk_grade__c                              AS assigned_grade,
+        NULLIF(l.automated_risk_grade__c, '')                     AS automated_grade_sf,
+        l.approved_uw_credit_limit__c                             AS approved_uw_cl,
+        l.underwriter__c                                          AS underwriter_id,
+        l.approver__c                                             AS approver_id,
+        COALESCE(l.ready_for_uw_start_time__c, l.createddate)     AS review_start_ts,
+        COALESCE(l.review_complete_time__c,
+                 l.auw_pre_doc_review_complete_time__c)           AS review_complete_ts,
+        COALESCE(l.review_complete_time__c::DATE,
+                 l.auw_pre_doc_review_complete_time__c::DATE)     AS review_date,
+        TO_CHAR(COALESCE(l.review_complete_time__c::DATE,
+                 l.auw_pre_doc_review_complete_time__c::DATE),
+                 'YYYY-MM')                                       AS year_month,
+        l.hvc_source__c,
+        l.annualized_revenue__c                                   AS hvc_revenue_sf,
+        l.credit_utilization_6m__c                               AS util_6m,
+        l.credit_utilization_12m__c                              AS util_12m,
+        l.current_utilization_rate__c                            AS util_current,
+        l.average_bank_balance__c                                AS avg_bank_balance_sf,
+        l.current_bank_balance__c                                AS current_bank_balance_sf,
+        l.risk_factor_personal_credit__c                         AS rf_personal_credit,
+        l.risk_factor_quality_of_revenue__c                      AS rf_quality_of_revenue,
+        l.risk_factor_bank_balance__c                            AS rf_bank_balance,
+        l.risk_factor_number_of_current_existing__c              AS rf_num_lenders,
+        l.risk_factor_existing_debt_service__c                   AS rf_debt_service,
+        l.risk_factor_industry__c                                AS rf_industry,
+        l.underwriting_summary__c,
+        l.uw_review_notes__c,
+        l.justification__c,
+        ROW_NUMBER() OVER (
+            PARTITION BY l.fundbox_id__c
+            ORDER BY COALESCE(l.review_complete_time__c,
+                              l.auw_pre_doc_review_complete_time__c) ASC
+        )                                                          AS review_seq_asc,
+        ROW_NUMBER() OVER (
+            PARTITION BY l.fundbox_id__c
+            ORDER BY COALESCE(l.review_complete_time__c,
+                              l.auw_pre_doc_review_complete_time__c) DESC
+        )                                                          AS review_seq_desc,
+        COUNT(*) OVER (PARTITION BY l.fundbox_id__c)              AS total_reviews
+    FROM EXTERNAL_DATA_SOURCES.SALESFORCE_NOVA.LOAN__C l
+    WHERE l.recordtypeid IN (
+        '012Rd000000AcjxIAC', '0124T000000DSMTQA4', '012Rd000000jbbJIAQ',
+        '012Rd000001B2txIAC', '012Rd000002EppVIAS', '012Rd000002Dp5CIAS'
+    )
+      AND COALESCE(l.review_complete_time__c,
+                   l.auw_pre_doc_review_complete_time__c) IS NOT NULL
+      AND TRY_TO_NUMBER(l.fundbox_id__c) IS NOT NULL
+      AND TRY_TO_NUMBER(l.fundbox_id__c) NOT IN (999999999999999910, 9987800100888)
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 2: SLA — clock hours + business hours
+--   FIX v2: GREATEST(0,...) on clock hours prevents negatives
+--   from bad SF timestamps; inner subquery materialises EST
+--   timestamps so outer CASE can reference them safely.
+-- ─────────────────────────────────────────────────────────────
+sla_base AS (
+    SELECT
+        review_id,
+        -- FIX: floor at 0 — prevents negative SLA from bad SF data
+        GREATEST(0,
+            TIMESTAMPDIFF('MINUTE', review_start_ts, review_complete_ts) / 60.0
+        )                                                          AS sla_clock_hrs,
+        CONVERT_TIMEZONE('America/New_York', review_start_ts)     AS start_est,
+        CONVERT_TIMEZONE('America/New_York', review_complete_ts)  AS end_est
+    FROM raw_reviews
+),
+
+sla_calc AS (
+    SELECT
+        review_id,
+        sla_clock_hrs,
+        CASE
+            WHEN start_est IS NULL OR end_est IS NULL THEN NULL
+            -- Same business day within 9-18
+            WHEN start_est::DATE = end_est::DATE
+                 AND DAYOFWEEK(start_est::DATE) NOT IN (0,6)
+                 AND start_est::DATE NOT IN (SELECT holiday_date FROM us_holidays)
+                 AND EXTRACT(HOUR FROM start_est) >= 9
+                 AND EXTRACT(HOUR FROM end_est)   <= 18
+            THEN (EXTRACT(HOUR FROM end_est)   + EXTRACT(MINUTE FROM end_est)  /60.0)
+               - GREATEST(9, EXTRACT(HOUR FROM start_est) + EXTRACT(MINUTE FROM start_est)/60.0)
+            ELSE (
+                CASE
+                    WHEN DAYOFWEEK(start_est::DATE) IN (0,6)
+                         OR start_est::DATE IN (SELECT holiday_date FROM us_holidays)
+                         OR EXTRACT(HOUR FROM start_est) >= 18 THEN 0
+                    WHEN EXTRACT(HOUR FROM start_est) < 9 THEN 9.0
+                    ELSE 18.0 - (EXTRACT(HOUR FROM start_est) + EXTRACT(MINUTE FROM start_est)/60.0)
+                END
+                + GREATEST(0,
+                      DATEDIFF('day', start_est::DATE, end_est::DATE) - 1
+                    - (DATEDIFF('week', start_est::DATE, end_est::DATE) * 2)
+                    + CASE WHEN DAYOFWEEK(start_est::DATE) = 0 THEN 1 ELSE 0 END
+                    + CASE WHEN DAYOFWEEK(start_est::DATE) = 6 THEN 1 ELSE 0 END
+                    + CASE WHEN DAYOFWEEK(end_est::DATE)   = 0 THEN 1 ELSE 0 END
+                    + CASE WHEN DAYOFWEEK(end_est::DATE)   = 6 THEN 1 ELSE 0 END
+                    - (
+                        CASE WHEN '2026-01-19'::DATE > start_est::DATE AND '2026-01-19'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-02-16'::DATE > start_est::DATE AND '2026-02-16'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-05-25'::DATE > start_est::DATE AND '2026-05-25'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-06-19'::DATE > start_est::DATE AND '2026-06-19'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-07-03'::DATE > start_est::DATE AND '2026-07-03'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-09-07'::DATE > start_est::DATE AND '2026-09-07'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-11-26'::DATE > start_est::DATE AND '2026-11-26'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-11-27'::DATE > start_est::DATE AND '2026-11-27'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-12-24'::DATE > start_est::DATE AND '2026-12-24'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-12-25'::DATE > start_est::DATE AND '2026-12-25'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                      + CASE WHEN '2026-12-31'::DATE > start_est::DATE AND '2026-12-31'::DATE < end_est::DATE THEN 1 ELSE 0 END
+                    )
+                  ) * 9.0
+                + CASE
+                    WHEN DAYOFWEEK(end_est::DATE) IN (0,6)
+                         OR end_est::DATE IN (SELECT holiday_date FROM us_holidays)
+                         OR EXTRACT(HOUR FROM end_est) < 9 THEN 0
+                    WHEN EXTRACT(HOUR FROM end_est) >= 18 THEN 9.0
+                    ELSE (EXTRACT(HOUR FROM end_est) + EXTRACT(MINUTE FROM end_est)/60.0) - 9.0
+                END
+            )
+        END AS sla_business_hrs
+    FROM sla_base
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 3: Credit limit day before and day after review
+-- ─────────────────────────────────────────────────────────────
+cl_before AS (
+    SELECT fbbid, credit_limit, edate FROM BI.PUBLIC.DAILY_APPROVED_CUSTOMERS_DATA
+),
+cl_after AS (
+    SELECT fbbid, credit_limit, edate FROM BI.PUBLIC.DAILY_APPROVED_CUSTOMERS_DATA
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 4: Point-in-time INDUS signals at review_date - 1
+--   FIX v2: JOIN LEADS_DATA and COALESCE revenue for Pre-Approval
+--   (Pre-Approval customers don't exist in INDUS at review time;
+--    LEADS_DATA has 100% revenue coverage for them)
+-- ─────────────────────────────────────────────────────────────
+indus_at_review AS (
+    SELECT
+        r.fbbid,
+        r.review_id,
+        i.og_score                          AS og_score_at_review,
+        i.og_bucket                         AS og_bucket_at_review,
+        i.og_bucket_group                   AS og_bucket_group_at_review,
+        i.ob_bucket_group_retro             AS ob_bucket_group_at_review,
+        i.vantage4                          AS vantage_at_review,
+        i.fico                              AS fico_at_review,
+        -- FIX v2: LEADS_DATA revenue fallback for Pre-Approval
+        COALESCE(
+            i.customer_annual_revenue,
+            CASE WHEN r.recordtypeid = '012Rd000000jbbJIAQ'
+                 THEN ld.calculated_annual_revenue END
+        )                                   AS indus_revenue_at_review,
+        i.customer_annual_revenue           AS indus_revenue_raw,
+        COALESCE(
+            i.customer_annual_revenue_group,
+            CASE WHEN r.recordtypeid = '012Rd000000jbbJIAQ'
+                      AND ld.calculated_annual_revenue IS NOT NULL
+                 THEN
+                    CASE
+                        WHEN ld.calculated_annual_revenue < 500000  THEN '$0-500K'
+                        WHEN ld.calculated_annual_revenue < 1500000 THEN '$500K-1.5M'
+                        ELSE '>$1.5M'
+                    END
+            END
+        )                                   AS revenue_group_at_review
+    FROM raw_reviews r
+    LEFT JOIN INDUS.PUBLIC.INDUS_KEY_METRICS_FILTERS_v2 i
+        ON r.fbbid = i.fbbid
+       AND i.edate = DATEADD('day', -1, r.review_date)
+    LEFT JOIN BI.CUSTOMERS.LEADS_DATA ld
+        ON r.fbbid = ld.fbbid
+       AND r.recordtypeid = '012Rd000000jbbJIAQ'  -- only join for Pre-Approval
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 5: Derived automated grade from OG score (Module C)
+-- ─────────────────────────────────────────────────────────────
+auto_grade_derived AS (
+    SELECT
+        review_id,
+        CASE
+            WHEN og_score_at_review <= 0.04               THEN 'B'
+            WHEN og_score_at_review <= 0.07               THEN 'C'
+            WHEN og_score_at_review <= 0.10               THEN 'D'
+            WHEN og_score_at_review <= 0.12               THEN 'E'
+            WHEN og_score_at_review IS NOT NULL            THEN 'F'
+            ELSE NULL
+        END AS derived_auto_grade
+    FROM indus_at_review
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 6: Effective bank balance
+--   FIX v2: DAILY_APPROVED fallback for existing-customer programs
+--   (AUW Monitoring 99%, HVC 99%, OG AUW 99%, OB AUW 88% fill rate)
+--   Pre-Approval and Second Look remain NULL — new customers have no
+--   daily balance history, so scorecard balance factor = 0 for them.
+-- ─────────────────────────────────────────────────────────────
+bank_balance_at_review AS (
+    SELECT
+        r.review_id,
+        r.avg_bank_balance_sf                                     AS sf_bank_balance,
+        da.current_balance_fi                                     AS daily_bank_balance,
+        -- For new-customer programs (Pre-Approval / Second Look), no daily balance
+        -- exists either — COALESCE naturally returns NULL, scoring 0 in the scorecard.
+        COALESCE(r.avg_bank_balance_sf, da.current_balance_fi)   AS bank_balance_eff
+    FROM raw_reviews r
+    LEFT JOIN BI.PUBLIC.DAILY_APPROVED_CUSTOMERS_DATA da
+        ON da.fbbid = r.fbbid
+       AND da.edate = DATEADD('day', -1, r.review_date)
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 7: Customer base info
+-- ─────────────────────────────────────────────────────────────
+cust AS (
+    SELECT
+        fbbid,
+        first_approved_time::DATE    AS first_approved_date,
+        first_approved_credit_limit  AS orig_credit_limit
+    FROM BI.PUBLIC.CUSTOMERS_DATA
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 8: Marketplace / channel
+-- ─────────────────────────────────────────────────────────────
+marketplace AS (
+    SELECT DISTINCT fbbid, termunits AS marketplace
+    FROM ANALYTICS.CREDIT.CUSTOMER_LEVEL_DATA_TD
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 9: Payment history (late count from payments_model)
+-- ─────────────────────────────────────────────────────────────
+payment_history AS (
+    SELECT
+        fbbid,
+        COUNT_IF(
+            direction = 'D'
+            AND (
+                payment_status IN ('DLMS','DELQ')
+                OR (payment_status = 'CANC' AND ach_return_code IN ('R01','R09'))
+            )
+        )                                                          AS late_payment_count,
+        COUNT_IF(direction = 'D' AND payment_status = 'FUND')     AS successful_payments,
+        COUNT_IF(
+            direction = 'D'
+            AND (
+                payment_status IN ('DLMS','DELQ','CHOF')
+                OR (payment_status = 'CANC'
+                    AND ach_return_code IS NOT NULL
+                    AND ach_return_code != '')
+            )
+        )                                                          AS failed_payments,
+        MAX(CASE WHEN direction = 'D' AND payment_status = 'FUND'
+                 THEN payment_event_time END)                      AS last_successful_payment_ts
+    FROM BI.FINANCE.PAYMENTS_MODEL
+    WHERE direction = 'D'
+      AND payment_description IN (
+          'Scheduled Repayment', 'Repayment', 'Pay Early', 'Payoff')
+    GROUP BY fbbid
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 10: DPD35+ flag (from FINANCE_METRICS_DAILY — dpd_days lives here)
+-- ─────────────────────────────────────────────────────────────
+dpd35_flag AS (
+    SELECT
+        fbbid,
+        MAX(
+            CASE
+                WHEN CASE
+                         WHEN dpd_days IS NULL AND is_charged_off = 0 THEN 0
+                         WHEN dpd_days IS NULL AND is_charged_off = 1 THEN 98
+                         ELSE dpd_days
+                     END >= 35
+                THEN 1 ELSE 0
+            END
+        ) AS any_dpd35_flag
+    FROM BI.FINANCE.FINANCE_METRICS_DAILY
+    WHERE product_type <> 'Flexpay'
+    GROUP BY fbbid
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 11: First DPD date (Module G post-approval windows)
+-- ─────────────────────────────────────────────────────────────
+first_dpd AS (
+    SELECT
+        fbbid,
+        MIN(edate) AS first_dpd_date
+    FROM BI.FINANCE.FINANCE_METRICS_DAILY
+    WHERE product_type <> 'Flexpay'
+      AND CASE
+              WHEN dpd_days IS NULL AND is_charged_off = 0 THEN 0
+              WHEN dpd_days IS NULL AND is_charged_off = 1 THEN 98
+              ELSE dpd_days
+          END >= 1
+    GROUP BY fbbid
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 12: Current performance snapshot
+-- ─────────────────────────────────────────────────────────────
+perf_current AS (
+    SELECT
+        fbbid,
+        MAX(is_charged_off)             AS is_charged_off,
+        MAX(charge_off_date)            AS charge_off_date,
+        MAX(dpd_days_corrected)         AS max_dpd_ever,
+        SUM(outstanding_principal_due)  AS outstanding_principal,
+        SUM(originated_amount)          AS total_originated,
+        COUNT(DISTINCT loan_key)        AS total_draws
+    FROM ANALYTICS.CREDIT.LOAN_LEVEL_DATA_PB
+    WHERE sub_product != 'mca'
+      AND week_end_date = DATEADD('day', -7, NEXT_DAY(CURRENT_DATE(), 'WED'))
+    GROUP BY fbbid
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 13: Prior decline by a DIFFERENT underwriter (Module F)
+-- ─────────────────────────────────────────────────────────────
+prior_declines AS (
+    SELECT
+        curr.review_id,
+        MAX(
+            CASE
+                WHEN (prev.approved_uw_cl = 0
+                      OR prev.status__c ILIKE '%reject%'
+                      OR prev.status__c ILIKE '%no increase%'
+                      OR prev.status__c ILIKE '%decline%')
+                THEN 1 ELSE 0
+            END
+        ) AS prior_decline_diff_uw_flag
+    FROM raw_reviews curr
+    JOIN raw_reviews prev
+        ON  curr.fbbid         = prev.fbbid
+        AND prev.review_date   < curr.review_date
+        AND prev.review_date  >= DATEADD('month', -6, curr.review_date)
+        AND COALESCE(prev.underwriter_id, '') != COALESCE(curr.underwriter_id, '')
+    GROUP BY curr.review_id
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 14: DSCR
+-- ─────────────────────────────────────────────────────────────
+dscr AS (
+    SELECT fbbid, dscr * 100 AS dscr_pct
+    FROM ANALYTICS.CREDIT.DEBT_PAYMENTS
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- STEP 15: Industry (today's NAICS)
+-- ─────────────────────────────────────────────────────────────
+industry AS (
+    SELECT
+        d.fbbid,
+        LEFT(d.industry_naics_code_edate, 4) AS naics_code_4,
+        n.naics_title                         AS industry_name
+    FROM BI.PUBLIC.DAILY_APPROVED_CUSTOMERS_DATA d
+    LEFT JOIN CDC_V2.AUDIT_LOG_HIST.NAICS_CODES_TO_TITLES_MAPPING n
+        ON d.industry_naics_code_edate = n.naics_code
+    WHERE d.edate = CURRENT_DATE
+    QUALIFY ROW_NUMBER() OVER (PARTITION BY d.fbbid ORDER BY d.edate DESC) = 1
+),
+
+-- ─────────────────────────────────────────────────────────────
+-- FINAL ASSEMBLY
+-- ─────────────────────────────────────────────────────────────
+assembled AS (
+    SELECT
+        -- ── IDENTITY ────────────────────────────────────────────────
+        r.fbbid,
+        r.review_id,
+        r.review_date,
+        r.year_month,
+        r.recordtypeid,
+        r.program_name,
+        r.program_group,
+        CASE
+            WHEN r.review_date < '2025-07-01' THEN '1. Launch (Apr-Jun 2025)'
+            WHEN r.review_date < '2025-10-01' THEN '2. Peak (Jul-Sep 2025)'
+            WHEN r.review_date < '2026-01-01' THEN '3. Q4 2025'
+            ELSE '4. Q1 2026+'
+        END                                                            AS review_phase,
+
+        -- ── UNDERWRITER ─────────────────────────────────────────────
+        r.underwriter_id,
+        COALESCE(uw.uw_name, r.underwriter_id)                        AS underwriter_name,
+        r.approver_id,
+        COALESCE(ap.uw_name, r.approver_id)                           AS approver_name,
+
+        -- ── DECISION ────────────────────────────────────────────────
+        r.status__c,
+        r.risk_level__c,
+        r.assigned_grade,
+        r.approved_uw_cl,
+
+        CASE r.recordtypeid
+            WHEN '012Rd000002Dp5CIAS' THEN
+                CASE
+                    WHEN r.status__c = 'Complete - Current CL'          THEN 'No Change'
+                    WHEN r.status__c = 'Reduce CL'                      THEN 'Decrease'
+                    WHEN r.status__c IN ('Close Account','RMR/Disable')  THEN 'Close/RMR/Disable'
+                    ELSE r.status__c
+                END
+            ELSE
+                CASE
+                    WHEN r.approved_uw_cl > COALESCE(clb.credit_limit, 0)
+                         AND r.approved_uw_cl > 0                        THEN 'Increase'
+                    WHEN r.approved_uw_cl < COALESCE(clb.credit_limit, 0)
+                         AND r.approved_uw_cl > 0                        THEN 'Decrease'
+                    WHEN r.approved_uw_cl = COALESCE(clb.credit_limit, 0) THEN 'No Change'
+                    WHEN r.approved_uw_cl = 0                             THEN 'Rejected'
+                    ELSE 'Other'
+                END
+        END                                                            AS decision_type,
+
+        CASE
+            WHEN r.status__c ILIKE '%increase%'
+              OR r.status__c ILIKE '%counteroffer%'
+              OR (r.approved_uw_cl > COALESCE(clb.credit_limit, 0)
+                  AND r.approved_uw_cl > 0)
+            THEN 1 ELSE 0
+        END                                                            AS approval_flag,
+
+        CASE
+            WHEN r.approved_uw_cl = 0
+              OR r.status__c ILIKE '%no increase%'
+              OR r.status__c ILIKE '%reject%'
+              OR r.status__c ILIKE '%decline%'
+            THEN 1 ELSE 0
+        END                                                            AS decline_flag,
+
+        -- ── CREDIT LIMITS ───────────────────────────────────────────
+        clb.credit_limit                                               AS pre_review_cl,
+        cla.credit_limit                                               AS post_review_cl,
+        CASE
+            WHEN cla.credit_limit > clb.credit_limit
+            THEN cla.credit_limit - clb.credit_limit
+            ELSE 0
+        END                                                            AS cl_increase_amount,
+
+        -- ── REVIEW SEQUENCE ─────────────────────────────────────────
+        r.review_seq_asc,
+        r.review_seq_desc,
+        r.total_reviews,
+        CASE WHEN r.review_seq_asc > 1 THEN 1 ELSE 0 END              AS is_re_review,
+
+        -- ── CUSTOMER TENURE AT REVIEW ───────────────────────────────
+        c.first_approved_date,
+        ROUND((r.review_date - c.first_approved_date) / 7.0, 1)       AS tenure_weeks_at_review,
+        CASE
+            WHEN c.first_approved_date IS NULL                          THEN 'Unknown'
+            WHEN (r.review_date - c.first_approved_date) / 7.0 <= 10   THEN '1. 0-10 wks'
+            WHEN (r.review_date - c.first_approved_date) / 7.0 <= 25   THEN '2. 10-25 wks'
+            WHEN (r.review_date - c.first_approved_date) / 7.0 <= 50   THEN '3. 25-50 wks'
+            WHEN (r.review_date - c.first_approved_date) / 7.0 <= 100  THEN '4. 50-100 wks'
+            ELSE '5. 100+ wks'
+        END                                                            AS tenure_bucket,
+
+        -- ── MODULE A: POPULATION MIX ────────────────────────────────
+        ir.og_score_at_review,
+        ir.og_bucket_at_review,
+        ir.og_bucket_group_at_review,
+        ir.ob_bucket_group_at_review,
+        CASE
+            WHEN r.recordtypeid IN ('012Rd000000AcjxIAC','0124T000000DSMTQA4')
+            THEN ir.ob_bucket_group_at_review
+            ELSE ir.og_bucket_group_at_review
+        END                                                            AS eaglet_gator_bucket,
+        ir.vantage_at_review,
+        CASE
+            WHEN ir.vantage_at_review IS NULL  THEN 'Unknown'
+            WHEN ir.vantage_at_review < 600    THEN '< 600'
+            WHEN ir.vantage_at_review < 640    THEN '600-640'
+            WHEN ir.vantage_at_review < 680    THEN '640-680'
+            WHEN ir.vantage_at_review < 720    THEN '680-720'
+            ELSE '720+'
+        END                                                            AS vantage_bucket,
+        ir.fico_at_review,
+        ir.indus_revenue_at_review,            -- includes Pre-Approval fallback
+        ir.indus_revenue_raw,                  -- original INDUS only, for reference
+        ir.revenue_group_at_review,
+        CASE
+            WHEN ir.indus_revenue_at_review IS NULL    THEN 'Unknown'
+            WHEN ir.indus_revenue_at_review < 500000   THEN '$0-500K'
+            WHEN ir.indus_revenue_at_review < 1500000  THEN '$500K-1.5M'
+            ELSE '>$1.5M'
+        END                                                            AS revenue_band,
+
+        -- ── MODULE B: DECISION BEHAVIOR ─────────────────────────────
+        CASE r.risk_level__c
+            WHEN 'Risk Level 0'   THEN 0
+            WHEN 'Risk Level I'   THEN 1
+            WHEN 'Risk Level II'  THEN 2
+            WHEN 'Risk Level III' THEN 3
+            WHEN 'Risk Level IV'  THEN 4
+            WHEN 'Risk Level V'   THEN 5
+            ELSE NULL
+        END                                                            AS risk_level_numeric,
+        CASE
+            WHEN r.assigned_grade IN ('A','B')         THEN 'Strong (A-B)'
+            WHEN r.assigned_grade = 'C'                THEN 'Borderline (C)'
+            WHEN r.assigned_grade IN ('D','E','F','G') THEN 'High Risk (D-G)'
+            ELSE 'Unknown'
+        END                                                            AS grade_tier,
+
+        -- ── MODULE C: OVERRIDE BEHAVIOR ─────────────────────────────
+        COALESCE(r.automated_grade_sf, ag.derived_auto_grade)         AS automated_grade,
+        CASE COALESCE(r.automated_grade_sf, ag.derived_auto_grade)
+            WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3
+            WHEN 'D' THEN 4 WHEN 'E' THEN 5 WHEN 'F' THEN 6 WHEN 'G' THEN 7
+        END                                                            AS auto_grade_numeric,
+        CASE r.assigned_grade
+            WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3
+            WHEN 'D' THEN 4 WHEN 'E' THEN 5 WHEN 'F' THEN 6 WHEN 'G' THEN 7
+        END                                                            AS assigned_grade_numeric,
+        -- negative = more lenient (upgraded), positive = more conservative
+        (
+            CASE r.assigned_grade WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 WHEN 'E' THEN 5 WHEN 'F' THEN 6 WHEN 'G' THEN 7 END
+          - CASE COALESCE(r.automated_grade_sf, ag.derived_auto_grade) WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 WHEN 'E' THEN 5 WHEN 'F' THEN 6 WHEN 'G' THEN 7 END
+        )                                                              AS override_delta,
+        CASE
+            WHEN COALESCE(r.automated_grade_sf, ag.derived_auto_grade) IS NULL
+              OR r.assigned_grade IS NULL                              THEN 'Unknown'
+            WHEN (CASE r.assigned_grade WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 WHEN 'E' THEN 5 WHEN 'F' THEN 6 WHEN 'G' THEN 7 END
+                - CASE COALESCE(r.automated_grade_sf, ag.derived_auto_grade) WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 WHEN 'E' THEN 5 WHEN 'F' THEN 6 WHEN 'G' THEN 7 END) < 0
+            THEN 'Upward (Aggressive)'
+            WHEN (CASE r.assigned_grade WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 WHEN 'E' THEN 5 WHEN 'F' THEN 6 WHEN 'G' THEN 7 END
+                - CASE COALESCE(r.automated_grade_sf, ag.derived_auto_grade) WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3 WHEN 'D' THEN 4 WHEN 'E' THEN 5 WHEN 'F' THEN 6 WHEN 'G' THEN 7 END) > 0
+            THEN 'Downward (Conservative)'
+            ELSE 'No Override'
+        END                                                            AS override_direction,
+
+        -- ── MODULE D: SLA ────────────────────────────────────────────
+        ROUND(s.sla_clock_hrs, 2)                                      AS sla_clock_hrs,
+        ROUND(s.sla_business_hrs, 2)                                   AS sla_business_hrs,
+        CASE WHEN s.sla_clock_hrs    > 48 THEN 1 ELSE 0 END            AS flag_sla_over_48hrs,
+        CASE WHEN s.sla_business_hrs <= 4  THEN 1 ELSE 0 END           AS flag_sla_within_4biz_hrs,
+        CASE WHEN s.sla_business_hrs <= 8  THEN 1 ELSE 0 END           AS flag_sla_within_8biz_hrs,
+        CASE WHEN s.sla_business_hrs <= 24 THEN 1 ELSE 0 END           AS flag_sla_within_24biz_hrs,
+        mk.marketplace,
+
+        -- ── MODULE E: QA SCORECARD ────────────────────────────────────
+
+        -- Effective bank balance (SF first, daily fallback for existing customers)
+        bb.bank_balance_eff,
+        bb.sf_bank_balance,
+        bb.daily_bank_balance,
+
+        -- Payment history classification
+        COALESCE(d35.any_dpd35_flag, 0)                                AS any_dpd35_flag,
+        ph.late_payment_count,
+        ph.successful_payments,
+        ph.failed_payments,
+        CASE
+            WHEN COALESCE(d35.any_dpd35_flag, 0) = 1              THEN 'Any DPD35+'
+            WHEN COALESCE(ph.late_payment_count, 0) >= 3           THEN '3+ Late'
+            WHEN COALESCE(ph.late_payment_count, 0) IN (1, 2)      THEN '1-2 Late'
+            ELSE 'Never Late'
+        END                                                            AS payment_history_class,
+
+        ROUND(dsc.dscr_pct, 1)                                         AS dscr_pct,
+        CASE
+            WHEN dsc.dscr_pct IS NULL  THEN 'Unknown'
+            WHEN dsc.dscr_pct <= 5     THEN '1. 0-5%'
+            WHEN dsc.dscr_pct <= 10    THEN '2. 5-10%'
+            WHEN dsc.dscr_pct <= 20    THEN '3. 10-20%'
+            WHEN dsc.dscr_pct <= 30    THEN '4. 20-30%'
+            WHEN dsc.dscr_pct <= 50    THEN '5. 30-50%'
+            ELSE '6. >50%'
+        END                                                            AS dscr_bucket,
+
+        -- OB Scorecard component scores (10 pts max)
+        CASE
+            WHEN ir.ob_bucket_group_at_review ILIKE '%1-4%'  THEN 4
+            WHEN ir.ob_bucket_group_at_review ILIKE '%5-7%'  THEN 3
+            WHEN ir.ob_bucket_group_at_review ILIKE '%8-10%' THEN 2
+            ELSE 0
+        END                                                            AS ob_score_bucket,
+        CASE
+            WHEN ir.vantage_at_review >= 720 THEN 3
+            WHEN ir.vantage_at_review >= 680 THEN 2
+            WHEN ir.vantage_at_review >= 640 THEN 1
+            ELSE 0
+        END                                                            AS ob_score_vantage,
+        CASE
+            WHEN COALESCE(bb.bank_balance_eff, 0)
+                 / NULLIF(ir.indus_revenue_at_review / 12.0, 0) >= 0.04 THEN 3
+            WHEN COALESCE(bb.bank_balance_eff, 0)
+                 / NULLIF(ir.indus_revenue_at_review / 12.0, 0) >= 0.02 THEN 2
+            WHEN COALESCE(bb.bank_balance_eff, 0)
+                 / NULLIF(ir.indus_revenue_at_review / 12.0, 0) >= 0.01 THEN 1
+            ELSE 0
+        END                                                            AS ob_score_balance_ratio,
+        -- OB total
+        (
+            CASE WHEN ir.ob_bucket_group_at_review ILIKE '%1-4%' THEN 4 WHEN ir.ob_bucket_group_at_review ILIKE '%5-7%' THEN 3 WHEN ir.ob_bucket_group_at_review ILIKE '%8-10%' THEN 2 ELSE 0 END
+          + CASE WHEN ir.vantage_at_review >= 720 THEN 3 WHEN ir.vantage_at_review >= 680 THEN 2 WHEN ir.vantage_at_review >= 640 THEN 1 ELSE 0 END
+          + CASE WHEN COALESCE(bb.bank_balance_eff,0)/NULLIF(ir.indus_revenue_at_review/12.0,0)>=0.04 THEN 3 WHEN COALESCE(bb.bank_balance_eff,0)/NULLIF(ir.indus_revenue_at_review/12.0,0)>=0.02 THEN 2 WHEN COALESCE(bb.bank_balance_eff,0)/NULLIF(ir.indus_revenue_at_review/12.0,0)>=0.01 THEN 1 ELSE 0 END
+        )                                                              AS ob_qa_score,
+
+        -- OG/HVC Scorecard component scores (13 pts max)
+        CASE
+            WHEN ir.og_bucket_group_at_review ILIKE '%1-4%'  THEN 4
+            WHEN ir.og_bucket_group_at_review ILIKE '%5-7%'  THEN 3
+            WHEN ir.og_bucket_group_at_review ILIKE '%8-10%' THEN 2
+            ELSE 0
+        END                                                            AS og_score_bucket,
+        CASE
+            WHEN ir.vantage_at_review >= 720 THEN 3
+            WHEN ir.vantage_at_review >= 680 THEN 2
+            WHEN ir.vantage_at_review >= 640 THEN 1
+            ELSE 0
+        END                                                            AS og_score_vantage,
+        CASE
+            WHEN COALESCE(bb.bank_balance_eff, 0) >= 50000 THEN 3
+            WHEN COALESCE(bb.bank_balance_eff, 0) >= 25000 THEN 2
+            WHEN COALESCE(bb.bank_balance_eff, 0) >= 5000  THEN 1
+            ELSE 0
+        END                                                            AS og_score_balance,
+        CASE
+            WHEN COALESCE(d35.any_dpd35_flag, 0) = 1          THEN 0
+            WHEN COALESCE(ph.late_payment_count, 0) >= 3       THEN 1
+            WHEN COALESCE(ph.late_payment_count, 0) IN (1, 2)  THEN 2
+            ELSE 3
+        END                                                            AS og_score_payment_history,
+        -- OG/HVC total
+        (
+            CASE WHEN ir.og_bucket_group_at_review ILIKE '%1-4%' THEN 4 WHEN ir.og_bucket_group_at_review ILIKE '%5-7%' THEN 3 WHEN ir.og_bucket_group_at_review ILIKE '%8-10%' THEN 2 ELSE 0 END
+          + CASE WHEN ir.vantage_at_review >= 720 THEN 3 WHEN ir.vantage_at_review >= 680 THEN 2 WHEN ir.vantage_at_review >= 640 THEN 1 ELSE 0 END
+          + CASE WHEN COALESCE(bb.bank_balance_eff,0) >= 50000 THEN 3 WHEN COALESCE(bb.bank_balance_eff,0) >= 25000 THEN 2 WHEN COALESCE(bb.bank_balance_eff,0) >= 5000 THEN 1 ELSE 0 END
+          + CASE WHEN COALESCE(d35.any_dpd35_flag,0)=1 THEN 0 WHEN COALESCE(ph.late_payment_count,0)>=3 THEN 1 WHEN COALESCE(ph.late_payment_count,0) IN (1,2) THEN 2 ELSE 3 END
+        )                                                              AS og_hvc_qa_score,
+
+        -- ── QA FLAG ──────────────────────────────────────────────────
+        -- FIX v2: require vantage_at_review IS NOT NULL before flagging.
+        --   Without this guard, new-customer programs (Second Look, Pre-Approval)
+        --   score 0 due to missing INDUS data and all approvals fire "Aggressive Flag"
+        --   as false positives. If we have no signal data, we cannot flag.
+        CASE
+            WHEN ir.vantage_at_review IS NULL THEN NULL   -- no signal data → no flag
+            WHEN r.recordtypeid IN ('012Rd000000AcjxIAC','0124T000000DSMTQA4') THEN
+                CASE
+                    WHEN (
+                        CASE WHEN ir.ob_bucket_group_at_review ILIKE '%1-4%' THEN 4 WHEN ir.ob_bucket_group_at_review ILIKE '%5-7%' THEN 3 WHEN ir.ob_bucket_group_at_review ILIKE '%8-10%' THEN 2 ELSE 0 END
+                      + CASE WHEN ir.vantage_at_review >= 720 THEN 3 WHEN ir.vantage_at_review >= 680 THEN 2 WHEN ir.vantage_at_review >= 640 THEN 1 ELSE 0 END
+                      + CASE WHEN COALESCE(bb.bank_balance_eff,0)/NULLIF(ir.indus_revenue_at_review/12.0,0)>=0.04 THEN 3 WHEN COALESCE(bb.bank_balance_eff,0)/NULLIF(ir.indus_revenue_at_review/12.0,0)>=0.02 THEN 2 WHEN COALESCE(bb.bank_balance_eff,0)/NULLIF(ir.indus_revenue_at_review/12.0,0)>=0.01 THEN 1 ELSE 0 END
+                    ) >= 8
+                    AND (r.approved_uw_cl = 0 OR r.status__c ILIKE '%reject%' OR r.status__c ILIKE '%no increase%')
+                    THEN 'Conservative Flag'
+                    WHEN (
+                        CASE WHEN ir.ob_bucket_group_at_review ILIKE '%1-4%' THEN 4 WHEN ir.ob_bucket_group_at_review ILIKE '%5-7%' THEN 3 WHEN ir.ob_bucket_group_at_review ILIKE '%8-10%' THEN 2 ELSE 0 END
+                      + CASE WHEN ir.vantage_at_review >= 720 THEN 3 WHEN ir.vantage_at_review >= 680 THEN 2 WHEN ir.vantage_at_review >= 640 THEN 1 ELSE 0 END
+                      + CASE WHEN COALESCE(bb.bank_balance_eff,0)/NULLIF(ir.indus_revenue_at_review/12.0,0)>=0.04 THEN 3 WHEN COALESCE(bb.bank_balance_eff,0)/NULLIF(ir.indus_revenue_at_review/12.0,0)>=0.02 THEN 2 WHEN COALESCE(bb.bank_balance_eff,0)/NULLIF(ir.indus_revenue_at_review/12.0,0)>=0.01 THEN 1 ELSE 0 END
+                    ) <= 2
+                    AND r.approved_uw_cl > 0
+                    THEN 'Aggressive Flag'
+                    ELSE NULL
+                END
+            ELSE
+                CASE
+                    WHEN (
+                        CASE WHEN ir.og_bucket_group_at_review ILIKE '%1-4%' THEN 4 WHEN ir.og_bucket_group_at_review ILIKE '%5-7%' THEN 3 WHEN ir.og_bucket_group_at_review ILIKE '%8-10%' THEN 2 ELSE 0 END
+                      + CASE WHEN ir.vantage_at_review >= 720 THEN 3 WHEN ir.vantage_at_review >= 680 THEN 2 WHEN ir.vantage_at_review >= 640 THEN 1 ELSE 0 END
+                      + CASE WHEN COALESCE(bb.bank_balance_eff,0) >= 50000 THEN 3 WHEN COALESCE(bb.bank_balance_eff,0) >= 25000 THEN 2 WHEN COALESCE(bb.bank_balance_eff,0) >= 5000 THEN 1 ELSE 0 END
+                      + CASE WHEN COALESCE(d35.any_dpd35_flag,0)=1 THEN 0 WHEN COALESCE(ph.late_payment_count,0)>=3 THEN 1 WHEN COALESCE(ph.late_payment_count,0) IN (1,2) THEN 2 ELSE 3 END
+                    ) >= 10
+                    AND (r.approved_uw_cl = 0 OR r.status__c ILIKE '%reject%' OR r.status__c ILIKE '%no increase%')
+                    THEN 'Conservative Flag'
+                    WHEN (
+                        CASE WHEN ir.og_bucket_group_at_review ILIKE '%1-4%' THEN 4 WHEN ir.og_bucket_group_at_review ILIKE '%5-7%' THEN 3 WHEN ir.og_bucket_group_at_review ILIKE '%8-10%' THEN 2 ELSE 0 END
+                      + CASE WHEN ir.vantage_at_review >= 720 THEN 3 WHEN ir.vantage_at_review >= 680 THEN 2 WHEN ir.vantage_at_review >= 640 THEN 1 ELSE 0 END
+                      + CASE WHEN COALESCE(bb.bank_balance_eff,0) >= 50000 THEN 3 WHEN COALESCE(bb.bank_balance_eff,0) >= 25000 THEN 2 WHEN COALESCE(bb.bank_balance_eff,0) >= 5000 THEN 1 ELSE 0 END
+                      + CASE WHEN COALESCE(d35.any_dpd35_flag,0)=1 THEN 0 WHEN COALESCE(ph.late_payment_count,0)>=3 THEN 1 WHEN COALESCE(ph.late_payment_count,0) IN (1,2) THEN 2 ELSE 3 END
+                    ) <= 3
+                    AND r.approved_uw_cl > 0
+                    THEN 'Aggressive Flag'
+                    ELSE NULL
+                END
+        END                                                            AS qa_flag_type,
+
+        -- ── MODULE F: POST-APPROVAL EARLY WARNING ────────────────────
+        CASE
+            WHEN r.assigned_grade IN ('A','B')
+              AND r.approved_uw_cl > 0
+              AND COALESCE(ph.successful_payments, 0) = 0
+            THEN 1 ELSE 0
+        END                                                            AS flag_ab_missed_first_payment,
+
+        CASE
+            WHEN r.approved_uw_cl > 0
+              AND DATEDIFF('day', r.review_date, CURRENT_DATE) <= 90
+              AND (COALESCE(pc.is_charged_off, 0) = 1
+                   OR COALESCE(pc.max_dpd_ever, 0) >= 1)
+            THEN 1 ELSE 0
+        END                                                            AS flag_rmr_cld_within_90d,
+
+        CASE
+            WHEN r.assigned_grade IN ('A','B')
+              AND r.approved_uw_cl > 0
+              AND COALESCE(pd.prior_decline_diff_uw_flag, 0) = 1
+            THEN 1 ELSE 0
+        END                                                            AS flag_ab_approval_prior_decline_diff_uw,
+
+        -- ── MODULE G: DQ TRACKING ────────────────────────────────────
+        COALESCE(pc.is_charged_off, 0)                                 AS is_charged_off,
+        pc.charge_off_date,
+        COALESCE(pc.max_dpd_ever, 0)                                   AS max_dpd_ever,
+        COALESCE(pc.outstanding_principal, 0)                          AS outstanding_principal,
+        CASE WHEN COALESCE(pc.max_dpd_ever, 0) > 0
+             THEN COALESCE(pc.outstanding_principal, 0) ELSE 0
+        END                                                            AS overdue_os,
+        fdpd.first_dpd_date,
+
+        CASE
+            WHEN fdpd.first_dpd_date IS NOT NULL
+              AND fdpd.first_dpd_date >= r.review_date
+              AND DATEDIFF('day', r.review_date, fdpd.first_dpd_date) <= 30
+            THEN 1 ELSE 0
+        END                                                            AS dpd_within_1m_flag,
+
+        CASE
+            WHEN fdpd.first_dpd_date IS NOT NULL
+              AND fdpd.first_dpd_date >= r.review_date
+              AND DATEDIFF('day', r.review_date, fdpd.first_dpd_date) <= 90
+            THEN 1 ELSE 0
+        END                                                            AS dpd_within_3m_flag,
+
+        CASE
+            WHEN fdpd.first_dpd_date IS NOT NULL
+              AND fdpd.first_dpd_date >= r.review_date
+              AND DATEDIFF('day', r.review_date, fdpd.first_dpd_date) <= 180
+            THEN 1 ELSE 0
+        END                                                            AS dpd_within_6m_flag,
+
+        CASE
+            WHEN fdpd.first_dpd_date IS NOT NULL
+              AND fdpd.first_dpd_date >= r.review_date
+            THEN
+                CASE
+                    WHEN DATEDIFF('day', r.review_date, fdpd.first_dpd_date) <= 30  THEN '1M'
+                    WHEN DATEDIFF('day', r.review_date, fdpd.first_dpd_date) <= 90  THEN '3M'
+                    WHEN DATEDIFF('day', r.review_date, fdpd.first_dpd_date) <= 180 THEN '6M'
+                    ELSE 'Beyond 6M'
+                END
+            ELSE NULL
+        END                                                            AS first_dpd_window,
+
+        -- ── MISC / CONTEXT ───────────────────────────────────────────
+        ind.industry_name,
+        ind.naics_code_4,
+        COALESCE(pc.total_draws, 0)     AS total_draws,
+        COALESCE(pc.total_originated, 0) AS total_originated,
+        r.rf_personal_credit,
+        r.rf_quality_of_revenue,
+        r.rf_bank_balance,
+        r.rf_num_lenders,
+        r.rf_debt_service,
+        r.rf_industry,
+        r.underwriting_summary__c,
+        r.uw_review_notes__c,
+        r.justification__c,
+        r.hvc_source__c,
+        r.util_6m,
+        r.util_12m,
+        r.util_current
+
+    FROM raw_reviews r
+    LEFT JOIN uw_map uw               ON r.underwriter_id  = uw.uw_id
+    LEFT JOIN uw_map ap               ON r.approver_id      = ap.uw_id
+    LEFT JOIN sla_calc s              ON r.review_id        = s.review_id
+    LEFT JOIN cl_before clb           ON clb.fbbid = r.fbbid AND clb.edate = DATEADD('day', -1, r.review_date)
+    LEFT JOIN cl_after  cla           ON cla.fbbid = r.fbbid AND cla.edate = DATEADD('day',  1, r.review_date)
+    LEFT JOIN indus_at_review ir      ON r.review_id        = ir.review_id
+    LEFT JOIN auto_grade_derived ag   ON r.review_id        = ag.review_id
+    LEFT JOIN bank_balance_at_review bb ON r.review_id      = bb.review_id
+    LEFT JOIN cust c                  ON r.fbbid             = c.fbbid
+    LEFT JOIN marketplace mk          ON r.fbbid             = mk.fbbid
+    LEFT JOIN payment_history ph      ON r.fbbid             = ph.fbbid
+    LEFT JOIN dpd35_flag d35          ON r.fbbid             = d35.fbbid
+    LEFT JOIN perf_current pc         ON r.fbbid             = pc.fbbid
+    LEFT JOIN first_dpd fdpd          ON r.fbbid             = fdpd.fbbid
+    LEFT JOIN prior_declines pd       ON r.review_id         = pd.review_id
+    LEFT JOIN dscr dsc                ON r.fbbid             = dsc.fbbid
+    LEFT JOIN industry ind            ON r.fbbid             = ind.fbbid
+)
+
+SELECT * FROM assembled;
+
+-- ============================================================
+-- VALIDATION QUERIES (run after CREATE TABLE completes)
+-- ============================================================
+-- 1. Row counts by program
+-- SELECT program_name, COUNT(*) AS reviews, COUNT(DISTINCT fbbid) AS customers
+-- FROM ANALYTICS.CREDIT.MUW_QA_DASHBOARD GROUP BY 1 ORDER BY 2 DESC;
+
+-- 2. Key fill rates by program
+-- SELECT program_name,
+--   ROUND(COUNT_IF(vantage_at_review IS NOT NULL)*100.0/COUNT(*),1)    AS pct_vantage,
+--   ROUND(COUNT_IF(indus_revenue_at_review IS NOT NULL)*100.0/COUNT(*),1) AS pct_revenue,
+--   ROUND(COUNT_IF(bank_balance_eff IS NOT NULL)*100.0/COUNT(*),1)     AS pct_balance,
+--   ROUND(COUNT_IF(qa_flag_type IS NOT NULL)*100.0/COUNT(*),1)         AS pct_qa_flagged
+-- FROM ANALYTICS.CREDIT.MUW_QA_DASHBOARD GROUP BY 1 ORDER BY 2 DESC;
